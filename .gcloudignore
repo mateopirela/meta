@@ -1,0 +1,20 @@
+# Lo que `gcloud builds submit` NO sube al bucket de Cloud Build. Sin este
+# archivo gcloud deriva la lista de .gitignore, pero lo hacemos explícito: el
+# tarball de origen queda guardado en gs://<proyecto>_cloudbuild y un .env ahí
+# sería el token de Meta en texto plano.
+.gcloudignore
+.git/
+.env
+.env.*
+!.env.example
+data/
+test/
+node_modules/
+.claude/
+.playwright-mcp/
+*.png
+*.log
+*.tmp
+deploy/
+README.md
+PLAN-live-triggers.md

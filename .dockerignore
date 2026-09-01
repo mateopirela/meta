@@ -1,0 +1,14 @@
+# Nada de esto va a la imagen: datos de usuarios reales, secretos, pruebas.
+data/
+.env
+.env.*
+!.env.example
+test/
+node_modules/
+.claude/
+.playwright-mcp/
+*.png
+*.log
+*.tmp
+deploy/
+README.md

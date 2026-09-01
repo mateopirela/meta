@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automatizaciones</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0e27'/%3E%3Cpath d='M8 11h16v10H13l-5 4z' fill='%23c4f635'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600&family=Source+Sans+3:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#panel">Saltar al contenido</a>
+
+  <!-- Login (solo cuando el servidor exige Firebase). -->
+  <div id="auth-gate" class="gate" hidden>
+    <div class="gate-card">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0a0e27"/><path d="M8 11h16v10H13l-5 4z" fill="#c4f635"/></svg>
+      <h1>Automatizaciones</h1>
+      <p class="lead">Herramienta interna de 30X. Entrá con tu cuenta de Google de la empresa.</p>
+      <button type="button" class="primary" id="btn-login">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4Z"/><path fill="#c4f635" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22Z"/><path fill="#fff" opacity=".7" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9l3.3-2.6Z"/><path fill="#fff" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4Z"/></svg>
+        Entrar con Google
+      </button>
+      <p class="field-error" id="gate-error" role="alert" hidden></p>
+      <button type="button" class="ghost" id="btn-gate-logout" hidden>Salir y probar con otra cuenta</button>
+    </div>
+  </div>
+
+  <div class="app" id="app" hidden>
+    <aside class="rail">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0a0e27"/><path d="M8 11h16v10H13l-5 4z" fill="#c4f635"/></svg>
+        <div>
+          <strong>Automatizaciones</strong>
+          <span>El DM sale solo, 24/7</span>
+        </div>
+      </div>
+
+      <nav class="pagenav" aria-label="Secciones">
+        <a href="/">Recuperación</a>
+        <a href="/live.html" class="current" aria-current="page">Automatizaciones</a>
+      </nav>
+
+      <div class="user" id="user-chip" hidden>
+        <span class="user-email" id="user-email"></span>
+        <button type="button" class="user-logout" id="btn-logout">Salir</button>
+      </div>
+
+      <nav aria-label="Vistas">
+        <ul class="railnav">
+          <li><button type="button" class="railnav-item" data-view-goto="list">Estado y automatizaciones</button></li>
+          <li><button type="button" class="railnav-item" data-view-goto="new">Nueva automatización</button></li>
+        </ul>
+      </nav>
+
+      <section class="history" aria-labelledby="rail-list-title">
+        <h2 id="rail-list-title">Tus automatizaciones</h2>
+        <ul id="rail-triggers"><li class="muted">Todavía no hay ninguna.</li></ul>
+      </section>
+    </aside>
+
+    <main class="panel" id="panel" tabindex="-1">
+
+      <!-- ── Lista ─────────────────────────────────────────────────────── -->
+      <section class="view" data-view="list">
+        <header class="view-head">
+          <p class="eyebrow">En vivo</p>
+          <h1>Automatizaciones</h1>
+          <p class="lead">Elegís un reel y una palabra una sola vez. Desde ahí, cada comentario nuevo que la diga recibe su mensaje directo solo, sin que nadie esté mirando.</p>
+        </header>
+
+        <div id="status-strip"></div>
+        <div id="trigger-list"></div>
+
+        <div class="actions">
+          <button type="button" class="primary" data-view-goto="new">Nueva automatización</button>
+        </div>
+      </section>
+
+      <!-- ── Nueva ─────────────────────────────────────────────────────── -->
+      <section class="view" data-view="new" hidden>
+        <header class="view-head">
+          <p class="eyebrow">Nueva automatización</p>
+          <h1>¿Qué reel y qué palabra?</h1>
+          <p class="lead">Queda escuchando ese reel. A la derecha ves exactamente lo que va a recibir cada persona que comente.</p>
+        </header>
+
+        <div id="new-banner"></div>
+
+        <div class="split">
+          <form id="form-trigger" class="form" novalidate>
+            <div class="field">
+              <label for="reel">Enlace del reel</label>
+              <input id="reel" name="reel" type="url" inputmode="url" autocomplete="off" required placeholder="https://www.instagram.com/reel/…" aria-describedby="reel-help">
+              <p class="help" id="reel-help">En Instagram: abrí el reel → <strong>···</strong> → <strong>Copiar enlace</strong>. La cuenta dueña se detecta sola.</p>
+              <p class="field-error" id="reel-error" role="alert" hidden></p>
+            </div>
+
+            <div class="field">
+              <label for="keywords">Palabras clave</label>
+              <input id="keywords" name="keywords" type="text" autocomplete="off" required placeholder="humano, IA" aria-describedby="keywords-help">
+              <p class="help" id="keywords-help">Separadas por coma. Se detecta si el comentario <em>contiene</em> la palabra, sin importar mayúsculas ni tildes — igual que ManyChat.</p>
+              <p class="field-error" id="keywords-error" role="alert" hidden></p>
+            </div>
+
+            <h2 class="sub">Mensaje directo</h2>
+            <p class="help">Meta solo permite una tarjeta: un título y un botón con enlace. Escribilo igual que lo tenía ManyChat.</p>
+
+            <div class="field">
+              <label for="cardTitle">Título de la tarjeta <span class="count" id="title-count" aria-live="polite">0/80</span></label>
+              <input id="cardTitle" name="cardTitle" type="text" maxlength="80" required autocomplete="off" placeholder="Aquí tienes el prompt que te prometí">
+              <p class="field-error" id="cardTitle-error" role="alert" hidden></p>
+            </div>
+            <div class="field">
+              <label for="cardButtonTitle">Texto del botón <span class="count" id="button-count" aria-live="polite">0/20</span></label>
+              <input id="cardButtonTitle" name="cardButtonTitle" type="text" maxlength="20" required autocomplete="off" placeholder="Ver el recurso">
+              <p class="field-error" id="cardButtonTitle-error" role="alert" hidden></p>
+            </div>
+            <div class="field">
+              <label for="cardButtonUrl">Enlace del botón</label>
+              <input id="cardButtonUrl" name="cardButtonUrl" type="url" inputmode="url" required autocomplete="off" placeholder="https://docs.google.com/…">
+              <p class="help">Adónde va la persona al tocar el botón.</p>
+              <p class="field-error" id="cardButtonUrl-error" role="alert" hidden></p>
+            </div>
+
+            <h2 class="sub">Respuesta pública</h2>
+            <div class="field">
+              <label for="replyTexts">Qué le respondemos debajo de su comentario</label>
+              <textarea id="replyTexts" name="replyTexts" rows="3" aria-describedby="reply-help">¡Listo! Te envié un mensaje con el recurso, revisa tus DMs
+Ya te lo mandé por DM, revisa tu bandeja
+Te escribí por DM con el acceso, compruébalo</textarea>
+              <p class="help" id="reply-help">Una por línea: se van alternando para no repetir el mismo texto. Salen más lento que los DMs (una por minuto) porque muchos comentarios tuyos seguidos en un mismo reel es lo que castiga el filtro de spam. Dejalo vacío si solo querés mandar el DM.</p>
+            </div>
+
+            <h2 class="sub">Qué comentarios entran</h2>
+            <label class="check">
+              <input type="checkbox" id="backfill">
+              <span>Responder también a los comentarios de los últimos 7 días
+                <span class="check-hint">Al crearla, mete en la cola a quienes ya comentaron la palabra y no recibieron nada. Meta no deja escribirle a nadie que haya comentado hace más de 7 días.</span>
+              </span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="includeReplies">
+              <span>Incluir respuestas a otros comentarios
+                <span class="check-hint">También detecta la palabra cuando la escriben respondiendo a otro comentario, no solo en el hilo principal.</span>
+              </span>
+            </label>
+
+            <details class="howto">
+              <summary>Frases de «ya atendido»</summary>
+              <div class="field">
+                <label for="processedPhrases">Si tu cuenta ya respondió con alguna de estas frases, no se vuelve a escribir</label>
+                <textarea id="processedPhrases" name="processedPhrases" rows="3" aria-describedby="phrases-help"></textarea>
+                <p class="help" id="phrases-help">Una por línea. Se copian solas de las respuestas públicas de arriba; editalas si ManyChat respondía con otro texto. Sirven sobre todo para los comentarios viejos, para no escribirle dos veces a la misma persona.</p>
+              </div>
+            </details>
+
+            <div class="actions">
+              <button type="button" class="ghost" data-view-goto="list">Cancelar</button>
+              <button type="submit" class="primary" id="btn-create">Crear automatización</button>
+            </div>
+          </form>
+
+          <aside class="preview" aria-label="Vista previa de lo que recibe la persona">
+            <p class="preview-label">Así lo va a ver cada persona</p>
+            <div class="phone">
+              <section class="phone-section">
+                <p class="phone-head">Comentarios</p>
+                <div class="comment">
+                  <span class="avatar" id="pv-avatar" aria-hidden="true">P</span>
+                  <div class="comment-body">
+                    <p><strong id="pv-user">persona</strong> <span id="pv-comment">humano</span></p>
+                    <div class="comment reply" id="pv-reply-wrap">
+                      <span class="avatar own" id="pv-owner-avatar" aria-hidden="true">T</span>
+                      <div class="comment-body"><p><strong id="pv-owner">tu_cuenta</strong> <span id="pv-reply">…</span></p></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <section class="phone-section">
+                <p class="phone-head">Mensaje directo</p>
+                <div class="dm">
+                  <span class="avatar own" id="pv-owner-avatar-2" aria-hidden="true">T</span>
+                  <div class="dm-card">
+                    <p class="dm-title" id="pv-title">Título de la tarjeta</p>
+                    <div class="dm-button" id="pv-button">Botón</div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ── Detalle ───────────────────────────────────────────────────── -->
+      <section class="view" data-view="detail" hidden>
+        <div id="detail"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/live.js"></script>
+</body>
+</html>

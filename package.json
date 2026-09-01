@@ -1,0 +1,23 @@
+{
+  "name": "manychat-recovery-cinthya",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Recupera los DMs perdidos del apagon de ManyChat en un reel de Cinthya (private_reply por comment_id). Incluye interfaz web local (npm run web).",
+  "scripts": {
+    "verify": "node --env-file=.env src/01-verify-access.mjs",
+    "fetch": "node --env-file=.env src/02-fetch-comments.mjs",
+    "classify": "node --env-file=.env src/03-classify.mjs",
+    "send": "node --env-file=.env src/04-send.mjs",
+    "send:commit": "node --env-file=.env src/04-send.mjs --commit",
+    "reverify": "node --env-file=.env src/05-reverify.mjs",
+    "report": "node --env-file=.env src/06-report.mjs",
+    "queue": "node --env-file=.env src/07-build-queue.mjs",
+    "queue:send": "node --env-file=.env src/08-send-queue.mjs",
+    "queue:commit": "node --env-file=.env src/08-send-queue.mjs --commit",
+    "reply": "node --env-file=.env src/09-public-reply.mjs",
+    "reply:commit": "node --env-file=.env src/09-public-reply.mjs --commit",
+    "web": "node web/server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

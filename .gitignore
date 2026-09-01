@@ -1,0 +1,17 @@
+# Secretos: el System User token de Meta vive aca.
+.env
+.env.*
+!.env.example
+
+# Datos de usuarios reales (usernames, texto de comentarios, IGSIDs de ~500
+# personas). Recursivo a proposito: nada de data/ se commitea salvo .gitkeep.
+data/**
+!data/.gitkeep
+
+# Temporales de la escritura atomica del CSV.
+*.tmp
+
+node_modules/
+
+# Config local del agente (no depender del gitignore global de la maquina).
+.claude/
