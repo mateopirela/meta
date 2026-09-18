@@ -16,3 +16,22 @@ verify_jwt = false
 
 [functions.meta-webhook]
 verify_jwt = false
+
+# Auth del proyecto remoto (`supabase config push`). Solo lo que esta app
+# necesita: adónde vuelven los enlaces de confirmación y de OAuth.
+[auth]
+site_url = "https://meta-five-xi.vercel.app"
+additional_redirect_urls = ["https://meta-five-xi.vercel.app/**", "http://localhost:8787/**", "http://127.0.0.1:8787/**"]
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+enable_confirmations = true
+double_confirm_changes = true
+# Igual que el remoto, para que `config push` no los pise con los defaults de la CLI.
+max_frequency = "1m0s"
+otp_length = 8
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
