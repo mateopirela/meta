@@ -8,33 +8,33 @@ const roundTrip = (rows) => fromCsv(toCsv(COLUMNS, rows)).rows;
 
 describe("csv round-trip", () => {
   test("texto simple", () => {
-    const rows = [{ comment_id: "1", username: "ana", text: "30x", sent_at: "" }];
+    const rows = [{ comment_id: "1", username: "ana", text: "guia", sent_at: "" }];
     assert.deepEqual(roundTrip(rows), rows);
   });
 
   test("texto con comas no corre las columnas", () => {
-    const rows = [{ comment_id: "1", username: "ana", text: "quiero 30x, ya, porfa", sent_at: "" }];
+    const rows = [{ comment_id: "1", username: "ana", text: "quiero guia, ya, porfa", sent_at: "" }];
     assert.deepEqual(roundTrip(rows), rows);
   });
 
   test("texto con comillas dobles", () => {
-    const rows = [{ comment_id: "1", username: "ana", text: 'dijo "30x" y se fue', sent_at: "" }];
+    const rows = [{ comment_id: "1", username: "ana", text: 'dijo "guia" y se fue', sent_at: "" }];
     assert.deepEqual(roundTrip(rows), rows);
   });
 
   test("texto con saltos de linea (los comentarios de IG los tienen)", () => {
-    const rows = [{ comment_id: "1", username: "ana", text: "30x\n\npor favor", sent_at: "" }];
+    const rows = [{ comment_id: "1", username: "ana", text: "guia\n\npor favor", sent_at: "" }];
     assert.deepEqual(roundTrip(rows), rows);
   });
 
   test("emoji", () => {
-    const rows = [{ comment_id: "1", username: "ana", text: "30x 🔥🙏 vamos", sent_at: "" }];
+    const rows = [{ comment_id: "1", username: "ana", text: "guia 🔥🙏 vamos", sent_at: "" }];
     assert.deepEqual(roundTrip(rows), rows);
   });
 
   test("el combo completo, que es el que rompe los parsers caseros", () => {
     const rows = [
-      { comment_id: "1", username: "ana", text: '30x, "ya"\nporfa 🔥', sent_at: "2026-07-15T12:00:00Z" },
+      { comment_id: "1", username: "ana", text: 'guia, "ya"\nporfa 🔥', sent_at: "2026-07-15T12:00:00Z" },
       { comment_id: "2", username: "bob", text: "normal", sent_at: "" },
     ];
     assert.deepEqual(roundTrip(rows), rows);

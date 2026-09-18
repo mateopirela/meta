@@ -22,7 +22,7 @@ const DEFAULTS = {
 };
 
 /** Ventana de private_reply de Meta. No es configurable: es una regla de ellos. */
-export const PRIVATE_REPLY_WINDOW_HOURS = 7 * 24;
+export { PRIVATE_REPLY_WINDOW_HOURS } from "./classify.mjs";
 
 /** Tope de private_replies de Meta por hora. Referencia para validar el ritmo. */
 export const META_HOURLY_SEND_CAP = 200;

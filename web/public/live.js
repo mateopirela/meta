@@ -1,9 +1,12 @@
 // Automatizaciones en vivo: un reel + una palabra y el DM sale solo. Sin frameworks.
 //
 // Tres vistas en una sola página: la lista (con el estado del sistema), el alta
-// y el detalle. Los patrones (api(), toast(), esc(), el arranque con Firebase,
-// el sondeo) están COPIADOS de app.js a propósito: cada página se sirve sola y
-// no depende de la otra.
+// y el detalle. Lee sus propias automatizaciones y filas de Postgres
+// (supabase-js + RLS) y escribe a través de la Edge Function `api`. Los
+// patrones (toast(), esc(), el sondeo) están COPIADOS de app.js a propósito:
+// cada página se sirve sola. La sesión sí es compartida (session.js).
+import { auth, sb, api, must, startSession } from "/session.js";
+import { downloadCsv, TRIGGER_COLUMNS } from "/csv.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -24,39 +27,83 @@ const ICON = {
 
 const state = {
   view: "list",
-  status: null,          // engine.status()
   triggers: [],          // resumen de cada automatización
+  webhook: null,         // fila de webhook_stats
   detail: null,          // { trigger, rows, counts }
   detailId: null,
   poll: null,
   loading: false,
-  live: null,            // /api/config → live
-  unavailable: false,    // el servidor todavía no responde /api/live/*
-  warned: false,
   phrasesTouched: false, // el usuario editó las frases de "ya atendido" a mano
 };
 
-// Sesión de Firebase (solo si el servidor la exige). Se llena en bootstrap().
-const auth = { required: false, user: null, getToken: async () => null, signOut: async () => {} };
+const hasToken = () => Boolean(auth.me?.meta?.configured);
+const system = () => auth.me?.system ?? { liveEnabled: true, webhookConfigured: false, pollIntervalMs: 20000 };
 
-// ── API ───────────────────────────────────────────────────────────────────────
-async function api(path, options = {}) {
-  const headers = { "content-type": "application/json", ...(options.headers ?? {}) };
-  const idToken = await auth.getToken();
-  if (idToken) headers.authorization = `Bearer ${idToken}`;
-  const res = await fetch(path, { ...options, headers });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(body.error ?? `Error ${res.status}`);
-    err.code = body.code;
-    err.status = res.status;
-    if (res.status === 401 && auth.required) {
-      showGate("Tu sesión venció. Volvé a entrar.");
-      auth.signOut().catch(() => {});
+// ── Datos ─────────────────────────────────────────────────────────────────────
+const summaryOf = (t) => ({
+  id: t.id,
+  status: t.status,
+  error: t.error ?? null,
+  shortcode: t.input?.shortcode,
+  reel: t.input?.reel,
+  permalink: t.resolved?.permalink ?? null,
+  igUsername: t.resolved?.igUsername ?? null,
+  igUserId: t.resolved?.igUserId ?? null,
+  keywords: t.input?.keywords ?? [],
+  counts: t.counts ?? {},
+  lastEventAt: t.last_event_at ?? null,
+  createdAt: t.created_at,
+  createdBy: t.created_by ?? null,
+});
+
+const detailOf = (t) => ({
+  ...t,
+  lastEventAt: t.last_event_at ?? null,
+  createdAt: t.created_at,
+  createdBy: t.created_by ?? null,
+  cursor: { ...(t.cursor ?? {}), seenIds: undefined, seenCount: t.cursor?.seenIds?.length ?? 0 },
+  log: (t.log ?? []).map((l) => ({ at: l.at, m: l.m ?? l.message ?? "" })),
+});
+
+async function loadAll() {
+  const [triggers, webhook] = await Promise.all([
+    must(await sb.from("triggers").select("id,status,error,input,resolved,counts,last_event_at,created_at,created_by").order("created_at", { ascending: false }).limit(100)),
+    must(await sb.from("webhook_stats").select("*").maybeSingle()),
+  ]);
+  state.triggers = triggers.map(summaryOf);
+  state.webhook = webhook;
+}
+
+async function loadDetail(id) {
+  try {
+    const [t, rows] = await Promise.all([
+      must(await sb.from("triggers").select("*").eq("id", id).maybeSingle()),
+      must(await sb.from("dm_rows").select("*").eq("kind", "trigger").eq("parent_id", id).order("comment_ts", { ascending: false }).limit(500)),
+    ]);
+    if (state.detailId !== id) return;
+    if (!t) {
+      state.detailId = null;
+      state.detail = null;
+      toast("Esa automatización ya no existe.");
+      setView("list");
+      return;
     }
-    throw err;
+    state.detail = { trigger: detailOf(t), rows, counts: t.counts };
+  } catch (err) {
+    toast(err.message);
   }
-  return body;
+}
+
+/** Lo que la lista muestra por cuenta: cuánto hay en cola, sumando sus automatizaciones activas. */
+function accountsStatus() {
+  const acc = new Map();
+  for (const t of state.triggers) {
+    if (t.status !== "active" || !t.igUserId) continue;
+    const a = acc.get(t.igUserId) ?? { igUserId: t.igUserId, igUsername: t.igUsername, pending: 0 };
+    a.pending += t.counts?.pending ?? 0;
+    acc.set(t.igUserId, a);
+  }
+  return [...acc.values()];
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -88,30 +135,21 @@ function fmtAgo(iso) {
   return `hace ${Math.round(h / 24)} d`;
 }
 
-/** "en 12 s" — para el próximo envío del drenador. */
-function fmtIn(at) {
-  if (!at) return "ya";
-  const ms = new Date(typeof at === "number" ? at : Date.parse(at)).getTime() - Date.now();
-  if (!Number.isFinite(ms) || ms <= 0) return "ya";
-  if (ms < 60_000) return `en ${Math.ceil(ms / 1000)} s`;
-  return `en ${Math.ceil(ms / 60_000)} min`;
-}
-
 // ── Etiquetas ─────────────────────────────────────────────────────────────────
 const STATUS_LABEL = { preparing: "Preparando", active: "Activa", paused: "Pausada", error: "Error" };
 const STATUS_HINT = {
-  preparing: "Estamos buscando el reel y dejando la cola lista: tarda unos segundos.",
+  preparing: "Estamos buscando el reel y dejando la cola lista: tarda menos de un minuto.",
   active: "Cada comentario nuevo con la palabra recibe su DM solo, sin que nadie mire.",
   paused: "No entra ni sale nada. Lo que quedó en cola te espera para cuando la actives.",
   error: "Se detuvo sola. Abajo está el motivo: corregilo y activala de nuevo.",
 };
 const DM_LABEL = {
-  pending: "En cola", sent: "Enviado", already_replied: "Ya tenía DM", comment_deleted: "Comentario borrado",
+  pending: "En cola", sending: "Enviando…", sent: "Enviado", already_replied: "Ya tenía DM", comment_deleted: "Comentario borrado",
   expired_mid_run: "Fuera de ventana", outside_window: "Fuera de ventana",
   needs_advanced_access: "Necesita acceso avanzado", error: "Error",
 };
 const REPLY_LABEL = {
-  pending: "Pendiente", replied: "Respondido", already_replied: "Ya tenía respuesta",
+  pending: "Pendiente", sending: "Respondiendo…", replied: "Respondido", already_replied: "Ya tenía respuesta",
   comment_deleted: "Comentario borrado", skipped: "—", error: "Error",
 };
 const SOURCE_LABEL = { webhook: "Webhook", poll: "Sondeo", backfill: "Anteriores" };
@@ -145,49 +183,36 @@ document.addEventListener("click", (e) => {
 // ── Estado del sistema ────────────────────────────────────────────────────────
 function renderStatus() {
   const el = $("#status-strip");
-  const s = state.status;
-  const cfg = state.live ?? {};
+  const sys = system();
+  const wh = state.webhook ?? {};
+  const pollSec = Math.round((sys.pollIntervalMs ?? 20000) / 1000);
 
-  if (state.unavailable) {
-    el.innerHTML = `
-      <div class="notice error">
-        <p class="notice-title">${ICON.alert} El modo en vivo todavía no responde</p>
-        <p>Este servidor no tiene las rutas <code>/api/live/*</code> (o se cayeron). Actualizalo y volvé a cargar la página: mientras tanto no se puede crear ni ver ninguna automatización.</p>
-      </div>`;
-    return;
-  }
-
-  const enabled = s?.enabled ?? cfg.enabled ?? false;
-  const tokenOk = s?.tokenConfigured ?? cfg.tokenConfigured ?? false;
-  const wh = s?.webhook ?? { configured: cfg.webhookConfigured ?? false };
-  const pollSec = Math.round((s?.pollIntervalMs ?? 20000) / 1000);
-
-  const envio = !tokenOk
-    ? { dot: "bad", title: "Falta la clave del sistema en el servidor", note: "Nadie recibe nada hasta que se cargue el token de Meta (secreto <code>meta-system-user-token</code>). Podés dejar las automatizaciones armadas: arrancan solas cuando esté." }
-    : !enabled
+  const envio = !hasToken()
+    ? { dot: "bad", title: "Falta tu clave de Meta", note: 'Nadie recibe nada hasta que cargues tu clave en <a href="/settings.html">Cuenta</a>. Podés dejar las automatizaciones armadas: las activás cuando esté.' }
+    : !sys.liveEnabled
       ? { dot: "warn", title: "Desactivado (<code>LIVE_ENABLED=false</code>)", note: "Las automatizaciones quedan guardadas pero no se manda ni un mensaje: es el interruptor general." }
       : { dot: "ok", title: "Activo", note: "Cada comentario que diga la palabra recibe su DM, a un ritmo de 200 por hora (el tope de Meta)." };
 
-  const deteccion = wh.configured
+  const deteccion = sys.webhookConfigured
     ? {
-        dot: wh.lastEventAt ? "ok" : "warn",
-        title: `Instantánea (webhook)${wh.lastEventAt ? ` · último evento ${fmtAgo(wh.lastEventAt)}` : ""}`,
-        note: wh.lastEventAt
+        dot: wh.last_event_at ? "ok" : "warn",
+        title: `Instantánea (webhook)${wh.last_event_at ? ` · último evento ${fmtAgo(wh.last_event_at)}` : ""}`,
+        note: wh.last_event_at
           ? `Meta nos avisa en el momento en que alguien comenta. El sondeo cada ${pollSec} s sigue corriendo de red de seguridad.${wh.events ? ` ${wh.events} eventos recibidos, ${wh.accepted ?? 0} con la palabra.` : ""}`
           : `El webhook está conectado pero todavía no llegó ningún evento. Mientras tanto el sondeo revisa el reel cada ${pollSec} s.`,
       }
     : {
         dot: "warn",
         title: `Cada ${pollSec} s (sondeo)`,
-        note: "Revisamos el reel nosotros, así que un comentario puede tardar hasta ese tiempo en recibir su DM. La detección instantánea se activa sola cuando se cargue el App Secret de Meta en el servidor.",
+        note: "Revisamos el reel nosotros, así que un comentario puede tardar hasta ese tiempo en recibir su DM. La detección instantánea se activa sola cuando se configure el webhook de Meta.",
       };
 
-  const accounts = (s?.accounts ?? []).map((a) => `
+  const accounts = accountsStatus().map((a) => `
     <div class="status-row">
       <span class="status-dot ${a.pending ? "warn" : "ok"}"></span>
       <span class="status-k">@${esc(a.igUsername ?? a.igUserId)}</span>
       <span class="status-v">${plural(a.pending ?? 0, "persona en cola", "personas en cola")}
-        <span class="status-note">Próximo DM ${esc(fmtIn(a.nextDmAt))}${a.nextReplyAt ? ` · próxima respuesta pública ${esc(fmtIn(a.nextReplyAt))}` : ""}.</span>
+        <span class="status-note">Sale un DM cada 18 s por cuenta.</span>
       </span>
     </div>`).join("");
 
@@ -241,7 +266,7 @@ function triggerCard(t) {
       <p class="trigger-meta">
         ${t.permalink ? `<a href="${esc(t.permalink)}" target="_blank" rel="noopener">ver el reel ${ICON.external}</a> · ` : ""}
         ${t.lastEventAt ? `último comentario ${esc(fmtAgo(t.lastEventAt))}` : "todavía sin comentarios con la palabra"}
-        ${t.createdBy ? ` · creada por ${esc(t.createdBy)}` : ""}${t.createdAt ? ` · ${esc(fmtDate(t.createdAt))}` : ""}
+        ${t.createdAt ? ` · ${esc(fmtDate(t.createdAt))}` : ""}
       </p>
       ${countsRow(t.counts)}
       <div class="actions">
@@ -254,7 +279,6 @@ function triggerCard(t) {
 
 function renderList() {
   const el = $("#trigger-list");
-  if (state.unavailable) { el.innerHTML = ""; return; }
   if (!state.triggers.length) {
     el.innerHTML = `
       <div class="empty">
@@ -269,7 +293,7 @@ function renderList() {
 function renderRail() {
   const ul = $("#rail-triggers");
   if (!state.triggers.length) {
-    ul.innerHTML = `<li class="muted">${state.unavailable ? "Sin conexión con el modo en vivo." : "Todavía no hay ninguna."}</li>`;
+    ul.innerHTML = `<li class="muted">Todavía no hay ninguna.</li>`;
     return;
   }
   ul.innerHTML = state.triggers.slice(0, 12).map((t) => `
@@ -287,7 +311,7 @@ function logBlock(trigger, open = true) {
   const log = trigger.log ?? [];
   if (!log.length) return "";
   return `<details class="log-wrap" ${open ? "open" : ""}><summary>Ver detalle técnico</summary><div class="log">${
-    log.slice(-80).map((l) => `<div><span>${esc(fmtTime(l.at))}</span> ${esc(l.m ?? l.message ?? "")}</div>`).join("")
+    log.slice(-80).map((l) => `<div><span>${esc(fmtTime(l.at))}</span> ${esc(l.m)}</div>`).join("")
   }</div></details>`;
 }
 
@@ -364,6 +388,7 @@ function renderDetail() {
   const counts = d.counts ?? t.counts ?? {};
   const hasReplies = (input.replyTexts ?? []).length > 0;
   const editable = ["paused", "error"].includes(t.status);
+  const sys = system();
 
   const acciones = t.status === "active"
     ? `<button type="button" class="ghost" data-act="pause" data-id="${esc(t.id)}">${ICON.pause} Pausar</button>`
@@ -380,7 +405,7 @@ function renderDetail() {
       </p>
       <p class="help">
         ${r.permalink ? `<a href="${esc(r.permalink)}" target="_blank" rel="noopener">ver el reel ${ICON.external}</a> · ` : ""}
-        detección ${t.status === "active" ? (state.status?.webhook?.configured ? "instantánea (webhook) + sondeo de respaldo" : `cada ${Math.round((state.status?.pollIntervalMs ?? 20000) / 1000)} s (sondeo)`) : "detenida"}
+        detección ${t.status === "active" ? (sys.webhookConfigured ? "instantánea (webhook) + sondeo de respaldo" : `cada ${Math.round((sys.pollIntervalMs ?? 20000) / 1000)} s (sondeo)`) : "detenida"}
         ${t.cursor?.lastPollAt ? ` · última revisión ${esc(fmtAgo(t.cursor.lastPollAt))}` : ""}
         ${t.lastEventAt ? ` · último comentario ${esc(fmtAgo(t.lastEventAt))}` : ""}
       </p>
@@ -394,7 +419,7 @@ function renderDetail() {
     <div class="actions">
       <button type="button" class="ghost" data-view-goto="list">${ICON.back} Volver</button>
       ${acciones}
-      <a class="button ghost" data-csv href="/api/live/triggers/${esc(t.id)}/export.csv" download="automatizacion-${esc(input.shortcode ?? t.id)}.csv">${ICON.download} Exportar CSV</a>
+      <button type="button" class="ghost" data-csv>${ICON.download} Exportar CSV</button>
       <button type="button" class="ghost" data-act="delete" data-id="${esc(t.id)}">${ICON.trash} Borrar</button>
     </div>
 
@@ -407,7 +432,7 @@ function renderDetail() {
 
     <p class="help">${editable
       ? "Podés cambiar los textos porque está en pausa. Los cambios valen para lo que salga de ahora en adelante: lo ya enviado no se toca."
-      : "Para cambiar los mensajes hay que pausarla primero. Mientras está activa el servidor está mandando DMs con estos textos, y cambiarlos a mitad dejaría gente con una versión y gente con otra."}</p>
+      : "Para cambiar los mensajes hay que pausarla primero. Mientras está activa se están mandando DMs con estos textos, y cambiarlos a mitad dejaría gente con una versión y gente con otra."}</p>
     ${editable ? editForm(t) : ""}
 
     <h2 class="sub">Quién comentó</h2>
@@ -425,6 +450,15 @@ document.addEventListener("click", (e) => {
   if (act === "delete") return removeTrigger(id);
 });
 
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-csv]");
+  if (!b || !state.detail?.trigger) return;
+  e.preventDefault();
+  const t = state.detail.trigger;
+  const rows = [...(state.detail.rows ?? [])].sort((a, b2) => new Date(a.comment_ts) - new Date(b2.comment_ts));
+  downloadCsv(`automatizacion-${t.input?.shortcode ?? t.id}.csv`, TRIGGER_COLUMNS, rows);
+});
+
 async function openTrigger(id) {
   state.detailId = id;
   state.detail = null;
@@ -437,25 +471,25 @@ async function openTrigger(id) {
 async function triggerAction(id, action, btn) {
   if (btn) btn.disabled = true;
   try {
-    const { trigger } = await api(`/api/live/triggers/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" });
+    const { trigger } = await api(`/triggers/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" });
     upsertTrigger(trigger);
-    if (state.detailId === id) state.detail = { ...(state.detail ?? {}), trigger };
+    if (state.detailId === id) state.detail = { ...(state.detail ?? {}), trigger: detailOf(trigger), counts: trigger.counts };
     toast(action === "pause"
       ? "Pausada. No sale ningún mensaje hasta que la actives."
       : "Activa. Los comentarios nuevos ya entran en la cola.", "ok");
     await refresh();
   } catch (err) {
-    toast(err.message);
+    toast(err.code === "token_required" ? `${err.message}` : err.message);
     if (btn) btn.disabled = false;
   }
 }
 
 async function removeTrigger(id) {
-  const t = state.triggers.find((x) => x.id === id) ?? state.detail?.trigger;
-  const kw = (t?.keywords ?? t?.input?.keywords ?? []).join(", ");
+  const t = state.triggers.find((x) => x.id === id) ?? (state.detail?.trigger ? summaryOf(state.detail.trigger) : null);
+  const kw = (t?.keywords ?? []).join(", ");
   if (!confirm(`¿Borrar la automatización de «${kw}»?\n\nSe pierde el registro de a quién ya se le escribió (exportá el CSV antes si lo necesitás). Los DMs enviados no se deshacen.`)) return;
   try {
-    await api(`/api/live/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await api(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
     state.triggers = state.triggers.filter((x) => x.id !== id);
     if (state.detailId === id) { state.detailId = null; state.detail = null; setView("list"); }
     toast("Borrada.", "ok");
@@ -467,47 +501,11 @@ async function removeTrigger(id) {
 
 function upsertTrigger(trigger) {
   if (!trigger?.id) return;
-  const summary = {
-    id: trigger.id,
-    status: trigger.status,
-    shortcode: trigger.input?.shortcode ?? trigger.shortcode,
-    permalink: trigger.resolved?.permalink ?? trigger.permalink,
-    igUsername: trigger.resolved?.igUsername ?? trigger.igUsername,
-    keywords: trigger.input?.keywords ?? trigger.keywords ?? [],
-    counts: trigger.counts ?? {},
-    lastEventAt: trigger.lastEventAt,
-    createdAt: trigger.createdAt,
-    createdBy: trigger.createdBy,
-  };
+  const summary = summaryOf(trigger);
   const i = state.triggers.findIndex((x) => x.id === trigger.id);
   if (i === -1) state.triggers.unshift(summary);
   else state.triggers[i] = { ...state.triggers[i], ...summary };
 }
-
-// ── Descarga del CSV ──────────────────────────────────────────────────────────
-// Con login, un <a href> pelado no lleva el token: se baja por fetch y se abre
-// como blob. Sin login (uso local) el enlace normal alcanza, igual que en la
-// recuperación.
-document.addEventListener("click", async (e) => {
-  const a = e.target.closest("a[data-csv]");
-  if (!a || !auth.required) return;
-  e.preventDefault();
-  try {
-    const idToken = await auth.getToken();
-    const res = await fetch(a.href, { headers: idToken ? { authorization: `Bearer ${idToken}` } : {} });
-    if (!res.ok) throw new Error("No se pudo bajar el CSV.");
-    const url = URL.createObjectURL(await res.blob());
-    const tmp = document.createElement("a");
-    tmp.href = url;
-    tmp.download = a.getAttribute("download") || "automatizacion.csv";
-    document.body.appendChild(tmp);
-    tmp.click();
-    tmp.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  } catch (err) {
-    toast(err.message);
-  }
-});
 
 // ── Formulario: validación inline y vista previa ──────────────────────────────
 function setFieldError(id, message) {
@@ -545,7 +543,7 @@ $("#replyTexts").addEventListener("input", syncPhrases);
 syncPhrases();
 
 function updatePreview() {
-  const owner = state.status?.accounts?.[0]?.igUsername ?? state.triggers[0]?.igUsername ?? "tu_cuenta";
+  const owner = accountsStatus()[0]?.igUsername ?? state.triggers[0]?.igUsername ?? auth.me?.meta?.accounts?.[0]?.username ?? "tu_cuenta";
   const keyword = lines($("#keywords").value.replace(/,/g, "\n"))[0] ?? "humano";
   const replies = lines($("#replyTexts").value);
 
@@ -566,15 +564,10 @@ function updatePreview() {
 
 function renderNewBanner() {
   const el = $("#new-banner");
-  const tokenOk = state.status?.tokenConfigured ?? state.live?.tokenConfigured ?? true;
-  if (state.unavailable) {
-    el.innerHTML = `<div class="notice error"><p class="notice-title">${ICON.alert} El modo en vivo no responde</p><p>Este servidor todavía no tiene las rutas <code>/api/live/*</code>. Podés escribir la automatización, pero no se va a poder guardar.</p></div>`;
-    return;
-  }
-  el.innerHTML = tokenOk ? "" : `
+  el.innerHTML = hasToken() ? "" : `
     <div class="notice error">
-      <p class="notice-title">${ICON.alert} Falta la clave del sistema en el servidor</p>
-      <p>Sin el token de Meta no se puede crear ninguna automatización. Cargá el secreto <code>meta-system-user-token</code> y volvé a intentar.</p>
+      <p class="notice-title">${ICON.alert} Falta tu clave de Meta</p>
+      <p>Sin ella no se puede crear ninguna automatización. Cargala en <a href="/settings.html">Cuenta</a> y volvé.</p>
     </div>`;
 }
 
@@ -602,7 +595,7 @@ $("#form-trigger").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.innerHTML = `${ICON.spinner} Creando…`;
   try {
-    const { trigger } = await api("/api/live/triggers", {
+    const { trigger } = await api("/triggers", {
       method: "POST",
       body: JSON.stringify({
         reel,
@@ -615,25 +608,24 @@ $("#form-trigger").addEventListener("submit", async (e) => {
       }),
     });
     upsertTrigger(trigger);
-    state.detail = { trigger, rows: [], counts: trigger.counts ?? {} };
+    state.detail = { trigger: detailOf(trigger), rows: [], counts: trigger.counts ?? {} };
     state.detailId = trigger.id;
     setView("detail");
-    toast("Creada. Preparando: en unos segundos empieza a escuchar.", "ok");
+    toast("Creada. Preparando: en menos de un minuto empieza a escuchar.", "ok");
     schedulePoll();
   } catch (err) {
-    if (err.status === 503 || err.code === "token_not_configured") {
-      renderNewBanner();
+    if (err.code === "token_required") {
       $("#new-banner").innerHTML = `
         <div class="notice error">
-          <p class="notice-title">${ICON.alert} Falta la clave del sistema en el servidor</p>
-          <p>${esc(err.message)}</p>
+          <p class="notice-title">${ICON.alert} Falta tu clave de Meta</p>
+          <p>${esc(err.message)} <a href="/settings.html">Ir a Cuenta</a>.</p>
         </div>`;
-      toast("Falta la clave del sistema en el servidor.");
+      toast("Falta tu clave de Meta.");
     } else if (err.status === 409 && err.code === "duplicate") {
       setFieldError("reel", "Ya hay una automatización para ese reel. Abrila desde la lista o borrala antes de crear otra.");
       $("#reel").focus();
     } else if (err.status === 400) {
-      setFieldError("reel", err.message);
+      setFieldError(err.field && $(`#${err.field}`) ? err.field : "reel", err.message);
       toast(err.message);
     } else {
       toast(err.message);
@@ -652,7 +644,7 @@ document.addEventListener("submit", async (e) => {
   const btn = $("#btn-edit");
   btn.disabled = true;
   try {
-    const { trigger } = await api(`/api/live/triggers/${encodeURIComponent(id)}/messages`, {
+    const { trigger } = await api(`/triggers/${encodeURIComponent(id)}/messages`, {
       method: "POST",
       body: JSON.stringify({
         keywords: $("#edit-keywords").value,
@@ -666,7 +658,7 @@ document.addEventListener("submit", async (e) => {
       }),
     });
     upsertTrigger(trigger);
-    state.detail = { ...(state.detail ?? {}), trigger };
+    state.detail = { ...(state.detail ?? {}), trigger: detailOf(trigger) };
     toast("Guardado. Vale para los mensajes que salgan de ahora en adelante.", "ok");
     const box = $("#edit-box");
     if (box) box.open = false;
@@ -678,45 +670,6 @@ document.addEventListener("submit", async (e) => {
 });
 
 // ── Carga y sondeo ────────────────────────────────────────────────────────────
-async function loadAll() {
-  const [st, tr] = await Promise.allSettled([api("/api/live/status"), api("/api/live/triggers")]);
-  if (st.status === "fulfilled") state.status = st.value.status ?? null;
-  if (tr.status === "fulfilled") state.triggers = tr.value.triggers ?? [];
-
-  const down = st.status === "rejected" && tr.status === "rejected";
-  state.unavailable = down;
-  if (down) {
-    state.status = null;
-    state.triggers = [];
-    const err = st.reason ?? tr.reason;
-    if (!state.warned && err?.status !== 401) {
-      state.warned = true;
-      toast(err?.status === 404
-        ? "Este servidor todavía no tiene el modo en vivo. Se ve la pantalla, pero no hay automatizaciones que mostrar."
-        : (err?.message ?? "No pude hablar con el servidor."));
-    }
-  } else {
-    state.warned = false;
-  }
-}
-
-async function loadDetail(id) {
-  try {
-    const d = await api(`/api/live/triggers/${encodeURIComponent(id)}`);
-    if (state.detailId !== id) return;
-    state.detail = d;
-  } catch (err) {
-    if (err.status === 404) {
-      state.detailId = null;
-      state.detail = null;
-      toast("Esa automatización ya no existe.");
-      setView("list");
-      return;
-    }
-    if (!state.unavailable) toast(err.message);
-  }
-}
-
 function busy() {
   const live = (t) => ["preparing", "active"].includes(t?.status);
   return state.triggers.some(live) || live(state.detail?.trigger);
@@ -724,8 +677,7 @@ function busy() {
 
 function schedulePoll() {
   clearTimeout(state.poll);
-  const ms = state.unavailable ? 30_000 : busy() ? 5_000 : 30_000;
-  state.poll = setTimeout(refresh, ms);
+  state.poll = setTimeout(refresh, busy() ? 5_000 : 30_000);
 }
 
 async function refresh() {
@@ -733,36 +685,17 @@ async function refresh() {
   state.loading = true;
   try {
     await loadAll();
-    if (state.view === "detail" && state.detailId && !state.unavailable) await loadDetail(state.detailId);
+    if (state.view === "detail" && state.detailId) await loadDetail(state.detailId);
     render();
+  } catch (err) {
+    toast(err.message);
   } finally {
     state.loading = false;
     schedulePoll();
   }
 }
 
-// ── Login ─────────────────────────────────────────────────────────────────────
-function showGate(message, { canSwitch = false } = {}) {
-  $("#app").hidden = true;
-  $("#auth-gate").hidden = false;
-  const err = $("#gate-error");
-  err.textContent = message ?? "";
-  err.hidden = !message;
-  $("#btn-gate-logout").hidden = !canSwitch;
-  $("#btn-login").hidden = canSwitch;
-}
-
-function showApp(user) {
-  $("#auth-gate").hidden = true;
-  $("#app").hidden = false;
-  if (user) {
-    $("#user-chip").hidden = false;
-    $("#user-email").textContent = user.email ?? "";
-    $("#user-email").title = user.email ?? "";
-  }
-  initApp();
-}
-
+// ── Arranque ──────────────────────────────────────────────────────────────────
 let appStarted = false;
 function initApp() {
   if (appStarted) { refresh(); return; }
@@ -771,65 +704,4 @@ function initApp() {
   refresh();
 }
 
-/**
- * Arranque: pregunta al servidor si hace falta login. Si no (uso local), abre
- * la app. Si sí, carga el SDK de Firebase y espera la sesión.
- */
-async function bootstrap() {
-  let cfg;
-  try {
-    cfg = await fetch("/api/config").then((r) => r.json());
-  } catch {
-    showGate("No pude hablar con el servidor. Recargá la página.");
-    return;
-  }
-  state.live = cfg.live ?? null;
-  if (!cfg.auth?.required) { showApp(null); return; }
-
-  auth.required = true;
-  const V = "10.14.1";
-  const [{ initializeApp }, fb] = await Promise.all([
-    import(`https://www.gstatic.com/firebasejs/${V}/firebase-app.js`),
-    import(`https://www.gstatic.com/firebasejs/${V}/firebase-auth.js`),
-  ]);
-  const fa = fb.getAuth(initializeApp(cfg.auth.firebase));
-  const provider = new fb.GoogleAuthProvider();
-  // `hd` solo pre-selecciona el dominio en el popup; el servidor es quien decide.
-  provider.setCustomParameters({ prompt: "select_account", ...(cfg.auth.allowedDomains?.[0] ? { hd: cfg.auth.allowedDomains[0] } : {}) });
-
-  auth.getToken = () => (fa.currentUser ? fa.currentUser.getIdToken() : Promise.resolve(null));
-  auth.signOut = () => fb.signOut(fa);
-
-  const login = async () => {
-    $("#gate-error").hidden = true;
-    try {
-      await fb.signInWithPopup(fa, provider);
-    } catch (err) {
-      const msg = err.code === "auth/unauthorized-domain"
-        ? "Este dominio no está autorizado en Firebase Auth (Authentication → Settings → Authorized domains)."
-        : err.code === "auth/popup-closed-by-user" ? "Se cerró la ventana de Google antes de terminar."
-        : err.message;
-      showGate(msg);
-    }
-  };
-  $("#btn-login").addEventListener("click", login);
-  $("#btn-gate-logout").addEventListener("click", () => auth.signOut().then(() => showGate()));
-  $("#btn-logout").addEventListener("click", () => auth.signOut().then(() => location.reload()));
-
-  fb.onAuthStateChanged(fa, async (user) => {
-    if (!user) { showGate(); return; }
-    auth.user = user;
-    // El servidor decide si este correo puede entrar. Se pregunta por /api/jobs
-    // (que existe desde siempre) para que el permiso no dependa de que las
-    // rutas del modo en vivo ya estén desplegadas.
-    try {
-      await api("/api/jobs");
-      showApp(user);
-    } catch (err) {
-      if (err.status === 403) showGate(err.message, { canSwitch: true });
-      else if (err.status !== 401) showGate(err.message);
-    }
-  });
-}
-
-bootstrap();
+startSession({ title: "Automatizaciones", onApp: initApp });

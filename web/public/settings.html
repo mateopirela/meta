@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cuenta</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0e27'/%3E%3Cpath d='M8 11h16v10H13l-5 4z' fill='%23c4f635'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600&family=Source+Sans+3:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#panel">Saltar al contenido</a>
+
+  <!-- Login (session.js lo dibuja cuando el servidor exige sesión). -->
+  <div id="auth-gate" class="gate" hidden></div>
+
+  <div class="app" id="app" hidden>
+    <aside class="rail">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0a0e27"/><path d="M8 11h16v10H13l-5 4z" fill="#c4f635"/></svg>
+        <div>
+          <strong>Cuenta</strong>
+          <span>Tu clave de Meta</span>
+        </div>
+      </div>
+
+      <nav class="pagenav" aria-label="Secciones">
+        <a href="/">Recuperación</a>
+        <a href="/live.html">Automatizaciones</a>
+        <a href="/settings.html" class="current" aria-current="page">Cuenta</a>
+      </nav>
+
+      <div class="user" id="user-chip" hidden>
+        <span class="user-email" id="user-email"></span>
+        <button type="button" class="user-logout" id="btn-logout">Salir</button>
+      </div>
+    </aside>
+
+    <main class="panel" id="panel" tabindex="-1">
+      <header class="view-head">
+        <p class="eyebrow">Cuenta</p>
+        <h1>Tu clave de Meta</h1>
+        <p class="lead">Todo lo que hace esta herramienta (leer comentarios, mandar DMs, responder) sale de tu propia cuenta de Meta, con la clave que cargues acá. Se guarda cifrada y nunca se muestra de vuelta.</p>
+      </header>
+
+      <div id="me"></div>
+
+      <form id="form-token" class="form" novalidate>
+        <div class="field">
+          <label for="token" id="token-label">Clave de acceso (token)</label>
+          <div class="input-row">
+            <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="token-help" placeholder="EAAG…">
+            <button type="button" class="ghost" id="toggle-token" aria-pressed="false" aria-controls="token">Mostrar</button>
+          </div>
+          <p class="help" id="token-help">Es un texto largo que suele empezar con <code>EAA</code>. Se verifica con Meta antes de guardarse.</p>
+          <p class="field-error" id="token-error" role="alert" hidden></p>
+        </div>
+
+        <details class="howto">
+          <summary>¿Dónde consigo la clave?</summary>
+          <ol>
+            <li>En <a href="https://business.facebook.com/settings/system-users" target="_blank" rel="noopener">Business Manager → Configuración del negocio → Usuarios del sistema</a>.</li>
+            <li>Elegí un usuario del sistema (o creá uno con rol Administrador) y tocá <strong>Generar nuevo token</strong>.</li>
+            <li>Elegí la app y marcá estos permisos: <code>instagram_basic</code>, <code>instagram_manage_comments</code>, <code>pages_messaging</code>, <code>instagram_manage_messages</code>, <code>pages_show_list</code>, <code>pages_read_engagement</code>.</li>
+            <li>La página de Facebook vinculada a tu Instagram tiene que estar en ese Business Manager, y el usuario del sistema tiene que tener acceso a ella (<strong>Asignar activos</strong>).</li>
+            <li>Copiá el token y pegalo arriba.</li>
+          </ol>
+        </details>
+
+        <div class="actions">
+          <button type="button" class="ghost danger" id="btn-delete" hidden>Borrar la clave</button>
+          <button type="submit" class="primary" id="btn-save">Verificar y guardar</button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/settings.js"></script>
+</body>
+</html>

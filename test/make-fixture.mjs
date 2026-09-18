@@ -7,7 +7,7 @@
 import { writeFile } from "node:fs/promises";
 
 const TOTAL = Number(process.argv[2] ?? 500);
-const OWNER = "cinthya";
+const OWNER = "creadora";
 const NOW = Date.now();
 
 const hoursAgo = (h) => new Date(NOW - h * 3_600_000).toISOString();
@@ -31,7 +31,7 @@ const comments = Array.from({ length: TOTAL }, (_, i) => {
     return {
       id: `c_${i}`,
       username: `user_${i}`,
-      text: "30x",
+      text: "guia",
       timestamp: hoursAgo(1 + (i % 200)),
       replies: {
         data: [{ id: `r_${i}`, username: OWNER, text: "Te acabo de enviar el link por DM!", timestamp: hoursAgo(1) }],
@@ -44,7 +44,7 @@ const comments = Array.from({ length: TOTAL }, (_, i) => {
     return {
       id: `c_${i}`,
       username: `user_${i}`,
-      text: "quiero el 30X porfa",
+      text: "quiero el GUIA porfa",
       timestamp: hoursAgo(24 * 8 + (i % 48)),
       replies: { data: [] },
     };
@@ -55,7 +55,7 @@ const comments = Array.from({ length: TOTAL }, (_, i) => {
     return {
       id: `c_${i}`,
       username: `user_${i}`,
-      text: "30x!!",
+      text: "guia!!",
       timestamp: hoursAgo(1 + (i % 150)),
       replies: { data: [{ id: `r_${i}`, username: OWNER, text: "gracias!! 🙏", timestamp: hoursAgo(1) }] },
     };
@@ -65,7 +65,7 @@ const comments = Array.from({ length: TOTAL }, (_, i) => {
   return {
     id: `c_${i}`,
     username: `user_${i}`,
-    text: i % 3 === 0 ? "30X" : "Quiero información 30x, cómo hago?",
+    text: i % 3 === 0 ? "GUIA" : "Quiero información guia, cómo hago?",
     timestamp: hoursAgo(1 + (i % 160)),
     replies: { data: [] },
   };

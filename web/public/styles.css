@@ -402,3 +402,18 @@ td.src { color: var(--muted); font-size: 13.5px; white-space: nowrap; }
   .status-k { width: auto; }
   .counts li { min-width: 84px; flex: 1; }
 }
+
+/* ── Puerta con correo+contraseña (session.js) ───────────────────────────── */
+.gate-card .lead { text-align: left; }
+.gate-card .primary svg { width: 20px; height: 20px; }
+.divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 14px; color: var(--muted); font-size: 13.5px; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.gate-form { text-align: left; }
+.gate-form .field { margin-bottom: 14px; }
+.gate-form input { width: 100%; }
+.gate-actions { display: flex; gap: 10px; margin-top: 4px; }
+.gate-actions .primary, .gate-actions .ghost { flex: 1; margin: 0; }
+.linklike { display: block; margin: 12px auto 0; min-height: 0; padding: 4px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 14px; text-decoration: underline; cursor: pointer; }
+.linklike:hover { color: var(--navy); }
+.ghost.danger { color: var(--danger); border-color: #f2c1bc; }
+.ghost.danger:hover:not(:disabled) { background: var(--danger-bg); }

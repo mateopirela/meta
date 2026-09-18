@@ -1,417 +1,141 @@
-# Recuperación de DMs — reel de Cinthya
+# meta
 
-Recupera los DMs que ManyChat no mandó durante el apagón: encuentra a quién comentó
-el keyword y nunca recibió el mensaje, y le manda la tarjeta de recuperación por
-`private_reply` de Meta Graph API.
+Instagram comment-to-DM automation on the Meta Graph API. Someone comments a keyword on your reel, they get a DM with a card (title + button), and optionally a public reply under their comment. It does what ManyChat does, with your own System User token, and it also recovers the DMs ManyChat failed to send.
 
-**Estado: listo para correr, bloqueado por dos datos que faltan.** Ver *Antes de empezar*.
+**Multi-tenant.** Anyone signs up (Supabase Auth: Google or email+password), pastes their own Meta System User token once, and from then on every reel they watch and every DM they send runs on their token and their Instagram accounts. Tokens are encrypted at rest. One user never sees another's reels, queues or tokens.
 
----
-
-## Antes de empezar (bloqueantes)
-
-Nada de esto corre sin:
-
-1. **Un System User token** con los scopes `instagram_basic`, `instagram_manage_comments`,
-   `pages_messaging`, `instagram_manage_messages`. No existe en este entorno: hay que
-   generarlo en el Business Manager.
-2. **Que la página de FB de Cinthya esté en nuestro Business Manager.** El `private_reply`
-   exige un Page Access Token de la página dueña del post. Si no está, esto no puede
-   enviar y no hay forma de esquivarlo desde el código. **El paso 1 te lo responde en
-   30 segundos** — corrélo apenas tengas el token, antes de invertir en lo demás.
-3. **El shortcode del reel** y **el keyword** del trigger.
-4. **El copy de la tarjeta** (título, texto del botón, URL con UTMs) tal como estaba en
-   el flow de ManyChat, para que el DM sea el que debieron recibir.
+**Runs entirely on Supabase + Vercel.** Postgres holds every row, pg_cron ticks the engine, Edge Functions do the work, and the static frontend lives on Vercel. There is no server to keep alive.
 
 ---
 
-## Setup
+## What it does
 
-```bash
-cd manychat-recovery-cinthya
-cp .env.example .env    # completar; cada variable dice de dónde sale
-npm test                # 102 tests, sin red — deben pasar antes de tocar nada
-```
-
-Sin dependencias: Node 24 nativo. No hay `npm install`.
-
-## Correrlo
-
-```bash
-npm run verify      # 1. ¿podemos enviar? read-only. SI DA ROJO, PARÁ ACÁ.
-npm run fetch       # 2. baja todos los comentarios -> data/comments.json
-npm run classify    # 3. decide a quién -> data/final-sendable.csv
-npm run send        # 4. DRY-RUN: muestra qué haría, no envía
-npm run send:commit # 4b. envía de verdad
-npm run reverify    # 5. confirma una muestra de los envíos
-npm run report      # 6. resumen
-npm run queue       # 7. (multi-reel) arma data/cola-global.csv con tarjeta por reel
-npm run queue:send  # 8. DRY-RUN de la cola global · queue:commit envía
-npm run reply       # 9. DRY-RUN: respuesta pública "comprueba tus DMs" a quien YA recibió el DM
-npm run reply:commit
-```
-
-Probar con una tanda chica antes de soltar las 500:
-
-```bash
-node --env-file=.env src/04-send.mjs --commit --limit=10
-npm run reverify -- --sample=10     # ¿los 10 quedaron registrados?
-```
-
-Si esos 10 dan verde, seguí con el resto. Si aparecen envíos caídos en silencio, hay
-algo sistémico y conviene frenar antes de quemar ventana.
-
----
-
-## Interfaz web (la misma recuperación, sin terminal)
-
-```bash
-npm run web        # http://127.0.0.1:8787
-```
-
-Cinco pasos, pensados para que lo use alguien que no conoce la herramienta:
-
-| Paso | Qué hace la persona | Qué hace el sistema |
+| Mode | When | How |
 |---|---|---|
-| 1. Conectar | Pega la clave de acceso (token) | La verifica al instante y muestra qué cuentas de IG administra |
-| 2. El reel | Pega el enlace y la palabra clave | Encuentra la cuenta dueña sola, baja y clasifica los comentarios |
-| 3. Quién falta | Mira el embudo y la lista | Explica en una frase cuántos quedaron sin respuesta y por qué |
-| 4. Mensajes | Escribe la tarjeta del DM y la respuesta | Vista previa en vivo de cómo lo ve la persona en Instagram |
-| 5. Enviar | Confirma y sigue el avance | Fase 1 DMs (200/h), fase 2 respuestas (60/h); pausar/reanudar; CSV |
+| **Live** (`/live.html`) | You want DMs to go out 24/7 without watching | Create an automation: reel + keyword(s) + card + optional public reply. Every new comment with the keyword gets the DM. Detection by polling (≤20 s) plus Meta's webhook when configured. |
+| **Recovery** (`/`) | ManyChat (or anything) went down and people commented with no DM | Point it at the reel and keyword. It reads every comment, finds who never got a reply, and sends the card to those still inside Meta's 7-day window. |
+| **Account** (`/settings.html`) | First thing after signing up | Paste your System User token. It's verified against Meta and stored encrypted. |
 
-El orden importa: **primero se busca a la gente, después se pide el copy** — nadie escribe una
-tarjeta para un reel donde no quedó nadie por recuperar. El borrador del formulario se guarda
-en el navegador (nunca la clave). El job se persiste en `data/jobs/` tras cada fila: podés
-cerrar la pestaña, pausar y reanudar.
+Both modes send with `private_reply` on `recipient.comment_id`. That's literally what ManyChat does under the hood.
 
-**El token vive solo en memoria del servidor** mientras el job corre; no va a disco ni vuelve
-en ninguna respuesta. Si el servidor se reinicia, la UI lo vuelve a pedir para reanudar.
-Escucha en `127.0.0.1` y **no tiene autenticación**: exponerlo en red requiere un proxy con
-auth delante (`HOST=0.0.0.0` lo permite, y te lo avisa al arrancar).
+## Architecture
 
-Código: `web/server.mjs` (http nativo, API JSON: `/api/verify`, `/api/jobs`, `…/messages`,
-`…/start`, `…/pause`, `…/export.csv`) · `web/public/` (HTML/JS/CSS sin frameworks) ·
-`src/recovery.mjs` (el pipeline como funciones, sin `process.exit`) · `src/jobs.mjs`
-(persistencia atómica de los jobs).
+```
+browser (Vercel, static)
+  ├─ reads own rows ──────▶ Postgres (RLS: owner_uid = auth.uid())
+  └─ writes ──────────────▶ Edge Function `api` ──▶ Postgres · Meta Graph API
+                                                       ▲
+pg_cron ── every 20 s ──▶ `worker-poll`  (prepare, analyze, poll Meta for new comments)
+        ── every 18 s ──▶ `worker-send`  (one DM + one public reply per IG account, paced by Postgres)
+Meta ─────── webhook ──▶ `meta-webhook` (HMAC-verified, instant ingest)
+```
 
-## Producción (Cloud Run + Firebase + GCS)
+- **Tables** (`supabase/migrations/…_schema.sql`): `profiles` (encrypted token + reachable IG accounts), `jobs`, `triggers`, `dm_rows` (every person to DM, from either mode; primary key = idempotency), `send_state` (per-IG-account pacing + cached page token), `webhook_stats`.
+- **Pacing lives in SQL.** `claim_next_dm(ig)` / `claim_next_reply(ig)` pick the oldest eligible row, check the account's clock, mark the row `sending` and advance the clock, all in one transaction. Two overlapping ticks can't double-send or exceed 200/hour.
+- **Tokens**: `profiles.meta_token_enc` is AES-256-GCM (`TOKEN_ENCRYPTION_KEY`, a function secret). Decrypted only inside a function for the duration of a call. Never returned, never logged. The `me` view exposes only *whether* a token exists.
+- **Auth**: functions call `auth.getUser(jwt)`; RLS uses `auth.uid()`. Verified email required; optional allowlists.
+- **Ownership**: every job and automation carries `owner_uid`. The API returns 404 for anything not yours, so existence doesn't leak.
 
-La misma app, desplegada como servicio para tenerla a mano cuando ManyChat se caiga:
+## Deploy
 
-| Pieza | Qué es | Por qué |
-|---|---|---|
-| **Login con Firebase** (el mismo proyecto que PreWave: `prewave-prod`, el proyecto de GCP; el viejo `prewave-prod-f1303` ya no existe) | Google sign-in; el servidor verifica el ID token contra los certificados de Google (sin `firebase-admin`) y solo deja pasar correos **verificados** de `AUTH_ALLOWED_DOMAINS` (default `30x.com`) o `AUTH_ALLOWED_EMAILS` | Cualquiera con la URL podría mandar DMs en nombre de la marca. Sin lista de permitidos el servidor **no arranca**. |
-| **Jobs en GCS** (`JOBS_BUCKET=prewave-recovery-jobs`) | Un JSON por job, por la API REST con la identidad del servicio | El disco de Cloud Run es efímero: un redeploy borraría el registro de a quién ya se le mandó, y ese registro es la idempotencia. Bucket privado, con versionado. |
-| **Cloud Run** `prewave-recovery` con `min=max=1` y CPU siempre asignada | Una instancia siempre viva (~US$15/mes) | El envío corre en background durante horas; con CPU acotada a requests se congela, y con N>1 dos procesos podrían tomar el mismo job. |
+### 1. Supabase
 
 ```bash
-bash deploy/setup.sh                       # una vez: service account + bucket
-bash deploy/deploy.sh                      # build en Cloud Build (sin Docker local) + deploy
+supabase link --project-ref <ref>
+supabase db query --linked -f supabase/migrations/20260918000000_schema.sql   # or: supabase db push
 ```
 
-Después del **primer** deploy, agregar el dominio del servicio en Firebase → Authentication →
-Settings → *Authorized domains*; si no, el popup de Google devuelve `auth/unauthorized-domain`.
-
-Variables (`web/server.mjs`): `AUTH_REQUIRED` (default `true` si hay `FIREBASE_PROJECT_ID`),
-`FIREBASE_PROJECT_ID` / `FIREBASE_API_KEY` / `FIREBASE_AUTH_DOMAIN`, `AUTH_ALLOWED_DOMAINS`,
-`AUTH_ALLOWED_EMAILS`, `JOBS_BUCKET`, `JOBS_PREFIX` (default `jobs/`). Para probar el bucket desde
-una laptop: `GCS_ACCESS_TOKEN=$(gcloud auth print-access-token) JOBS_BUCKET=… npm run web`.
-
-Lo que sigue igual que en local: el **token de Meta vive solo en memoria** mientras corre el
-job. Un redeploy a mitad de un envío lo deja en *Interrumpida*; se reanuda pegando la clave de
-nuevo, sin duplicar nada (la fila ya enviada está en el bucket).
-
-## Modo en vivo (reemplazo de ManyChat)
-
-La recuperación de arriba es para cuando ManyChat ya falló. **El modo en vivo es
-para no depender más de ManyChat**: se configura una *automatización* una vez
-(reel + palabra(s) clave + tarjeta del DM + respuesta pública opcional) y, desde
-ahí, **cada comentario nuevo con la palabra recibe el DM solo**, 24/7, sin nadie
-mirando. El envío es el mismo `private_reply` de siempre — es literalmente lo que
-ManyChat hace por debajo.
-
-```
-                  ┌── webhook de Meta (campo `comments`) → instantáneo ┐
-comentario nuevo ─┤                                                     ├─→ ledger → cola → DM
-                  └── sondeo (cada ~20 s por reel activo) → ≤ 20 s     ┘        └─→ respuesta pública
-```
-
-**Los dos caminos corren a la vez y no se pisan**: los dos dedupean por
-`comment_id` contra el mismo ledger, así que un comentario que llega por los dos
-lados entra una sola vez (y si algo se escapara, el `2534023` de Meta lo rebota).
-El sondeo es el camino primario hasta que se cargue el App Secret; después queda
-como red de seguridad, porque los webhooks se pierden.
-
-### Usarlo
-
-Interfaz: **`/live.html`** (mismo login, mismo servidor). Una automatización pasa por:
-
-| Estado | Qué significa |
-|---|---|
-| `Preparando` | Busca el reel entre las cuentas del token, lee los comentarios que ya existen (para no tratarlos como nuevos) y suscribe la página |
-| `Activa` | Sondea y envía |
-| `Pausada` | No detecta ni envía. Lo que ya estaba en cola espera ahí; se puede editar el copy |
-| `Error` | El mensaje dice qué pasó. `Activar` reintenta |
-
-Editar los mensajes o borrar exige **pausar** primero. Borrar elimina la
-automatización y su ledger.
-
-**Arranque con backfill** (`Responder también a los comentarios de los últimos 7
-días`): al activarse, encola también los comentarios viejos que tengan la palabra,
-no estén respondidos por el owner y sigan dentro de la ventana. Sin eso, arranca
-solo con lo que llegue de acá en adelante.
-
-### Los límites que respeta
-
-Los mismos de la recuperación, por las mismas razones (ver *Las tres cosas que
-cambian el resultado*): **200 DMs/hora** (1 cada 18 s) y **60 respuestas
-públicas/hora** (1 por minuto), **por cuenta de Instagram** — dos automatizaciones
-del mismo `@usuario` comparten la cola, no tienen una cada una. La ventana de 7
-días se revalida fila por fila justo antes de enviar. Los intervalos por debajo
-del piso **no arrancan el servidor**.
-
-Lo que **no** entra al ledger: los comentarios sin la palabra, los del propio
-owner (incluida nuestra respuesta pública, que vuelve por el webhook) y los
-vencidos. Se cuentan como *ignorados* y se olvidan: un reel viral con 20 000
-comentarios no puede inflar el archivo.
-
-### Variables
-
-| Variable | Default | Para qué |
-|---|---|---|
-| `META_SYSTEM_USER_TOKEN` | — | El System User token. **Sin esto el modo en vivo queda apagado.** En local cae a `META_TOKEN_MARKETING_INTEGRATION` |
-| `META_APP_SECRET` | — | Verifica la firma del webhook. Vacío o `unset` = webhook apagado (`POST /webhooks/meta` → 503) |
-| `META_WEBHOOK_VERIFY_TOKEN` | — | El string del handshake `GET /webhooks/meta` |
-| `LIVE_ENABLED` | `true` si hay token | Interruptor general |
-| `LIVE_POLL_INTERVAL_MS` | `20000` | Sondeo por automatización activa. Piso 10 000 |
-| `LIVE_SEND_INTERVAL_MS` | `18000` | Piso 18 000 (200/hora) |
-| `LIVE_REPLY_INTERVAL_MS` | `60000` | Piso 18 000 |
-| `LIVE_WINDOW_SAFETY_HOURS` | `2` | Igual que `WINDOW_SAFETY_HOURS` |
-
-En producción los tres primeros vienen de **Secret Manager** (`meta-system-user-token`,
-`meta-app-secret`, `meta-webhook-verify-token`), que crea `deploy/setup.sh`. En
-`--set-env-vars` no va ningún secreto: quedaría a la vista en la consola de GCP.
-
-### API
-
-| Método y ruta | Qué hace |
-|---|---|
-| `GET /api/live/status` | Estado global: si está activo, si hay token, si el webhook está configurado, cuentas y su cola |
-| `GET /api/live/triggers` | Lista de automatizaciones (resumen) |
-| `POST /api/live/triggers` | Crea una y arranca la preparación. `503` sin token; `409` si ya hay una para ese reel |
-| `GET /api/live/triggers/:id` | La automatización + sus filas (máx. 500, la más nueva primero) + contadores |
-| `POST /api/live/triggers/:id/pause` | Pausa |
-| `POST /api/live/triggers/:id/activate` | Activa (o reintenta la preparación si quedó en error) |
-| `POST /api/live/triggers/:id/messages` | Cambia tarjeta / respuestas / palabras. `409` si está activa |
-| `DELETE /api/live/triggers/:id` | Borra automatización + ledger. `409` si está activa |
-| `GET /api/live/triggers/:id/export.csv` | Las filas en CSV (mismas columnas que la recuperación + `source`, `received_at`, `attempts`, `from_id`) |
-| `GET`/`POST /webhooks/meta` | Handshake y eventos de Meta. **Sin login** (Meta no puede iniciar sesión): la autenticación es la firma HMAC |
-
-Todo `/api/live/*` pasa por el mismo login de Firebase que el resto.
-
-### Checklist de la mañana (lo que solo puede hacer el dueño de la cuenta)
-
-Hasta que se hagan estos pasos, el modo en vivo funciona igual **por sondeo**
-(detección ≤ 20 s). Esto lo vuelve instantáneo:
-
-1. developers.facebook.com → app **PreWave Comentarios** (`1336335331994289`) →
-   *App settings → Basic* → **App Secret** → `Show`, y cargarlo:
-   ```bash
-   printf '%s' '<secret>' | gcloud secrets versions add meta-app-secret --project prewave-prod --data-file=-
-   gcloud run services update prewave-recovery --region us-central1 --update-secrets META_APP_SECRET=meta-app-secret:latest
-   ```
-2. Misma app → *Products → Webhooks* → objeto **Instagram** → *Edit subscription*:
-   - Callback URL: `https://prewave-recovery-ohyjsinh2a-uc.a.run.app/webhooks/meta`
-   - Verify token: `gcloud secrets versions access latest --secret meta-webhook-verify-token --project prewave-prod`
-   - Guardar (tiene que decir *verified*) y suscribirse al campo **`comments`**.
-3. Si la app está en modo *Development*, los eventos de IG solo llegan de cuentas
-   con rol en la app o en el Business. La página ya está en el BM (por eso el
-   envío funciona); si igual no llegan eventos después de comentar de prueba,
-   pasar la app a **Live** (no hace falta App Review para lo que usamos).
-4. Probar: comentar la palabra desde una cuenta personal en el reel. En `Estado`
-   tiene que aparecer `Detección: instantánea · último evento hace 0 s`.
-
-### Qué NO hace (a propósito)
-
-- Automatizaciones por cuenta ("cualquier reel"): hoy es un reel por automatización.
-- Triggers por DM ("escribime HUMANO"): es otro webhook y otras reglas de ventana.
-- Flujos de varios pasos (follow gate, captura de email): necesitan Advanced Access.
-
-## Las tres cosas que cambian el resultado
-
-### 1. La ventana de 7 días es el reloj que corre
-
-`private_reply` solo funciona dentro de los **7 días de cada comentario** (no del reel).
-Los comentarios viejos ya no son recuperables y no hay nada que hacer al respecto.
-
-Por eso la cola va ordenada **del comentario más viejo al más nuevo**: los que menos
-ventana les queda salen primero. Y el paso 4 **revalida la ventana fila por fila justo
-antes de enviar**, porque en un run de 2,5 h hay gente que expira a mitad de camino.
-
-El paso 3 te dice cuántos de los 500 siguen vivos. Puede ser bastante menos de 500.
-
-### 2. El ritmo: 200/hora, no 1 cada 2 segundos
-
-La Skill original dice *"1 send / 2s (well below Meta's 200/hr cap)"*. **Eso está mal**:
-1 cada 2s son 1800/hora, nueve veces el tope. Con 3 destinatarios no se nota; con 500
-chocás con el error #613 cerca del envío 200.
-
-Acá el default es `SEND_INTERVAL_MS=18000` = 200/hora exactos, y `config.mjs` **rechaza
-arrancar** si lo bajás por debajo de eso. 500 envíos ≈ **2,5 horas**. El script es
-reanudable justamente porque el run es largo.
-
-### 3. Idempotencia por partida doble
-
-- **Nuestra**: el CSV guarda `sent_at` por fila y se escribe **después de cada envío**,
-  de forma **atómica** (temporal + `rename`). Volver a correr saltea lo ya hecho. Si se
-  corta la luz en el envío 300, perdés como mucho ese uno: los 299 anteriores están en
-  disco. La atomicidad no es cosmética — un `writeFile` común trunca y después escribe,
-  así que morirse en el medio dejaba el CSV vacío y perdías el rastro de los 299.
-- **La de Meta**: un `comment_id` admite un solo `private_reply`. Un duplicado devuelve
-  `400 / error_subcode 2534023`. Esto es una **red de seguridad real**: si ManyChat sí
-  llegó a mandarle a alguien, nuestro envío rebota solo. Por eso el clasificador puede
-  permitirse ser generoso (ver abajo).
-
-### Qué pasa si se cae la red
-
-En 500 llamadas a lo largo de 2,5 h, un timeout o un blip de DNS es esperable. El
-enviador reintenta con backoff (30s, 60s, 90s) tanto los errores de Meta (#613 rate
-limit, 429/5xx) como los fallos de red. Solo si agota los 3 intentos marca la fila como
-error y sigue con la siguiente: **un hipo de red no corta el run**.
-
----
-
-## Cómo decide a quién mandarle
-
-`src/classify.mjs`, funciones puras, 23 tests.
-
-Un comentario es **enviable** si cumple las tres:
-
-| Corte | Criterio |
-|---|---|
-| Comentó el keyword | `contains`, sin acentos, case-insensitive — igual que ManyChat |
-| No lo procesó ManyChat | no hay respuesta del owner que matchee `PUBLIC_REPLY_PHRASES` |
-| Está dentro de los 7 días | menos el margen de `WINDOW_SAFETY_HOURS` |
-
-**El criterio de "ya procesado" es a propósito estricto** (owner **Y** frase de la
-automatización). Si Cinthya le respondió "gracias!" a mano, ese comentario cuenta como
-**perdido** y se le manda el DM — porque un "gracias" no es la automatización. El riesgo
-de mandar de más lo cubre el 2534023 de Meta: si ya tenía DM, rebota. Preferimos
-recuperar de más y que Meta filtre, antes que dejar gente afuera.
-
-**Si no cargás `PUBLIC_REPLY_PHRASES`**, el criterio cae al conservador: *cualquier*
-respuesta del owner cuenta como procesado. Eso deja gente afuera. Vale la pena conseguir
-las frases reales del flow.
-
----
-
-## Por qué estas cuatro cosas no se tocan
-
-En `meta.mjs`, `sendPrivateReply`. Salieron a golpes y cada desvío tiene su error:
-
-| Regla | Si te desviás |
-|---|---|
-| Endpoint `/me/messages`, no `/{ig_user_id}/messages` | error #3 (capability missing) |
-| **Page** token, no System User token | error #190 |
-| `recipient.comment_id`, no `recipient.id` | #200/2534048 (pide Advanced Access) |
-| `messaging_type: "RESPONSE"` | el envío no sale |
-
-## Por qué no hay CDP acá
-
-La Skill original maneja un puente CDP contra el Chrome real del usuario. Eso existe
-para clasificar cuentas que **no** están en el Business Manager, donde la Graph API no
-puede leer los comentarios.
-
-Nuestro caso no lo necesita: **enviar el DM ya exige estar en el BM**, y esa misma
-condición habilita la lectura por Graph. Si el paso 1 da verde, `/{media}/comments` lee
-todo. Si da rojo, no hay envío posible y el CDP solo serviría para entregar un CSV
-clasificado sin poder actuar sobre él.
-
-## Verificación (paso 5)
-
-Confirma reintentando **la misma tarjeta**:
-
-- `2534023` → el original quedó registrado. **Confirmado.**
-- `200 + message_id nuevo` → el original se cayó en silencio (filtro de privacidad del
-  destinatario). El reintento pasó a ser la entrega real — por eso se reintenta con la
-  tarjeta y no con un texto cualquiera.
-
-**Cada verificación es un `private_reply` más y come del tope de 200/hora.** Verificar
-las 500 duplica el run a ~5 h. Por eso el default es una muestra de 20, suficiente para
-detectar una caída sistémica. `--all` si querés todo.
-
-## Atribución
-
-`REWRITE_UTM_MEDIUM=true` reescribe `utm_medium` a `ig_dm_recovery` para separar la
-cohorte de recuperación de la orgánica en HubSpot. El resto de los UTMs queda intacto.
-Ponelo en `false` si preferís que caigan en la misma cohorte que el reel.
-
-## Límites conocidos
-
-- **Cuentas privadas**: la Graph API filtra sus comentarios, así que no tenemos su
-  `comment_id` y no hay forma de alcanzarlos. El paso 2 te avisa del desfasaje entre lo
-  que Meta reporta y lo que devuelve.
-- **Un solo card por envío**: `recipient.comment_id` admite un generic template. Los
-  flows multi-paso de ManyChat (follow gate, etc.) necesitan Advanced Access.
-- **No hay confirmación de lectura**: 200 + `message_id` = Meta lo aceptó. Si el usuario
-  no sigue a la cuenta, le cae en Solicitudes.
-
-## Archivos
-
-| Path | Qué hace |
-|---|---|
-| `src/config.mjs` | Config + validación. Acá vive el guard del rate limit. |
-| `src/meta.mjs` | Todo lo que toca la red (Graph API). El token va por header, no por query param: no loguees la URL. |
-| `src/classify.mjs` | Lógica pura de "a quién le mandamos". Testeada. |
-| `src/csv.mjs` | CSV RFC4180 + escritura atómica. El texto de IG trae comas, comillas y saltos de línea. |
-| `src/01..08-*.mjs` | Los pasos del pipeline (DMs). |
-| `src/09-public-reply.mjs` | Respuesta pública en el hilo, solo a quien ya recibió el DM. Ritmo propio, copy rotativo, pre-check de idempotencia. |
-| `src/blobstore.mjs` | El store de blobs (disco o GCS) que comparten los jobs y el modo en vivo. |
-| `src/live/rules.mjs` | Lógica pura del modo en vivo: a quién se le manda, firma del webhook, cursor. Testeada. |
-| `src/live/engine.mjs` | El ciclo de vida de las automatizaciones. Lo único que muta su estado. |
-| `src/live/poller.mjs` · `webhook.mjs` | Los dos caminos de entrada de un comentario. |
-| `src/live/sender.mjs` | La cola de salida por cuenta (200 DMs/h + 60 respuestas/h). |
-| `src/live/triggers.mjs` · `ledger.mjs` | Persistencia de las automatizaciones y sus filas. |
-| `test/*.test.mjs` | 102 tests, sin red. |
-| `test/make-fixture.mjs` | Genera 500 comentarios falsos para probar sin token. |
-| `data/` | Salidas. Gitignoreado: son datos de ~500 usuarios reales. |
-
-Probar el pipeline sin token:
+Secrets for the functions (`.env` has them all; see `.env.example`):
 
 ```bash
-node test/make-fixture.mjs 500
-REEL_SHORTCODE=FIXTURE001 IG_USERNAME=cinthya TRIGGER_KEYWORD=30x \
-  PUBLIC_REPLY_PHRASES='te acabo de enviar' node src/03-classify.mjs
+supabase secrets set --env-file .env
+supabase functions deploy --no-verify-jwt
 ```
 
-## Respuesta pública (paso 9)
+Then tell pg_cron where the functions live and how to authenticate (Vault, never in a migration):
 
-Lo otro que hace ManyChat: el comentario del owner debajo del de cada persona
-("te envié un mensaje, comprueba tus DMs"). Se construyó **después** de ver cómo salieron
-los DMs, como paso aparte, y con tres frenos que el envío no necesita:
+```sql
+select vault.create_secret('https://<ref>.supabase.co/functions/v1', 'functions_url');
+select vault.create_secret('<the same WORKER_SECRET as in .env>', 'worker_secret');
+```
 
-| Freno | Por qué |
-|---|---|
-| Solo filas cuyo DM salió (`status` = `sent` o `likely_undeliverable_privacy`) | Nunca prometer un DM que no existe |
-| Ritmo propio, default **1/min** (`PUBLIC_REPLY_INTERVAL_MS`) | N respuestas del owner en un solo hilo desde la API es el patrón que castiga el filtro de spam, y el costo es un límite sobre la cuenta, no un 400 |
-| Copy rotativo (`PUBLIC_REPLY_TEXTS`, separado por barra vertical) | N veces el mismo string exacto es spam de libro |
+**Authentication → URL configuration**: Site URL = your Vercel URL, and add it to Redirect URLs (confirmation and OAuth links land there). **Providers**: Email is on by default; enable Google if you want that button.
 
-**La idempotencia acá es nuestra, no de Meta.** A diferencia del `private_reply`,
-`/{comment_id}/replies` NO rebota duplicados: dos llamadas son dos respuestas visibles. Por eso
-el paso hace dos cosas: guarda `public_reply_id` por fila (atómico, tras cada una) y, antes de
-responder, **lee las replies del comentario** y saltea si el owner ya respondió con alguna de
-nuestras frases o de las de ManyChat (`PUBLIC_REPLY_PHRASES`). Un corte a mitad de run no
-duplica ni una.
+### 2. Vercel
 
-Los textos van escritos para que matcheen `PUBLIC_REPLY_PHRASES`: si alguien vuelve a correr el
-paso 3, nuestras respuestas cuentan como "ya procesado", igual que las de ManyChat.
+`web/public/` is the whole site; `vercel.json` points there with no build. `web/public/config.js` holds the project URL and the publishable key (public by design). Connect the GitHub repo and every push to `main` deploys.
+
+### 3. Meta webhook (optional, makes detection instant)
+
+Polling works for every tenant regardless of which Meta app their token came from. The webhook only fires for tokens generated under **your** Meta app.
+
+1. developers.facebook.com → your app → **App settings → Basic** → App Secret → `META_APP_SECRET` secret.
+2. **Products → Webhooks** → object **Instagram** → callback `https://<ref>.supabase.co/functions/v1/meta-webhook`, verify token = `META_WEBHOOK_VERIFY_TOKEN`, subscribe to `comments`.
+3. Each automation also calls `POST /{page-id}/subscribed_apps` with the tenant's page token when it activates.
+
+## Local development
 
 ```bash
-npm run reply                                                  # dry-run: a quién y con qué texto
-node --env-file=.env src/09-public-reply.mjs --commit --limit=10   # tanda de prueba
-npm run reply:commit                                           # el resto
+cp .env.example .env     # fill TOKEN_ENCRYPTION_KEY and WORKER_SECRET
+npm test                 # pure tests, no network
+supabase start && supabase functions serve --no-verify-jwt --env-file .env   # needs Docker
+npm run web              # static frontend on :8787 (edit config.js to point at local)
 ```
 
-Recorre `data/cola-global.csv` y `data/final-sendable.csv`. Usa el Page token (el que sí
-"actúa" sobre la página, misma lección de las cuatro cosas de arriba); si Meta devuelve #10/#200,
-probá `--system-token`. Volver a correr es seguro.
+## API (`/functions/v1/api`)
+
+All routes need `Authorization: Bearer <Supabase access token>`. Reads happen from the browser via RLS; these are the writes.
+
+| Route | What |
+|---|---|
+| `GET /me` | Profile, whether a Meta token is configured, reachable IG accounts, live-mode flags. |
+| `PUT /me/token` `{token}` | Verify with Meta (`/me/accounts`) and store encrypted. `400 bad_token` / `no_pages`. `409` if a recovery is running. |
+| `DELETE /me/token` | Remove it. Active automations stop. |
+| `POST /jobs` | Create a recovery (analysis runs on the next poll tick). `409 token_required`. |
+| `POST /jobs/:id/messages` · `/start` · `/pause` · `DELETE /jobs/:id` | Card + reply + pacing; run; pause; delete. One running job per tenant. |
+| `POST /triggers` | Create an automation (prepared on the next poll tick). `409 duplicate` for the same reel. |
+| `POST /triggers/:id/pause` · `/activate` · `/messages` · `DELETE /triggers/:id` | Lifecycle. Edit and delete only while paused. |
+
+## The three things that change the outcome
+
+**The 7-day window is the clock.** `private_reply` only works within 7 days of each comment. Queues are ordered oldest-first because those expire first, and the window is re-checked per row right before sending.
+
+**200 per hour, not 1 every 2 seconds.** Meta caps private replies at ~200/hour per account. Default pacing is 18 s per DM (exactly 200/h), enforced in SQL. Public replies go at 1/min on purpose: many owner comments in one thread in a burst is the pattern Meta's spam filter punishes.
+
+**Idempotency, twice.** Ours: `dm_rows` has a primary key on the comment and every send is persisted per row, so a restart never resends. Meta's: a `comment_id` accepts one `private_reply`; a second returns `400 / 2534023`. That's a real safety net, which is why the classifier can afford to be generous.
+
+## The four things in `sendPrivateReply` that don't change
+
+| Rule | If you deviate |
+|---|---|
+| Endpoint `/me/messages`, not `/{ig_user_id}/messages` | error #3 |
+| **Page** token (derived from the System User token), not the System User token itself | error #190 |
+| `recipient.comment_id`, not `recipient.id` | #200 / 2534048 (asks for Advanced Access) |
+| `messaging_type: "RESPONSE"` | the send silently doesn't go out |
+
+## Getting a System User token (what users do)
+
+Business Manager → Business settings → **System users** → create one (Admin) → **Generate new token** → pick the app and these permissions: `instagram_basic`, `instagram_manage_comments`, `instagram_manage_messages`, `pages_messaging`, `pages_show_list`, `pages_read_engagement`. The Facebook page linked to the Instagram account must be in that Business Manager and assigned to the system user.
+
+## Known limits
+
+- Private accounts: the Graph API doesn't return their comments, so there is no `comment_id` to reply to.
+- One card per DM. Multi-step flows (follow gate, email capture) need Advanced Access.
+- No read receipts. `200 + message_id` means Meta accepted it; if the person doesn't follow you it lands in Requests.
+- Analysis and backfill read the newest 4 000 comments of a reel (80 pages) per tick.
+
+## CLI pipeline
+
+`src/01-verify-access.mjs` … `src/09-public-reply.mjs` are the original single-token scripts (`npm run verify`, `fetch`, `classify`, `send`, `reverify`, `report`, `queue`, `queue:send`, `reply`). They read `META_TOKEN_MARKETING_INTEGRATION` and the reel/keyword/card from `.env`, write CSVs to `data/`, and are useful for a one-off recovery from a terminal. They share the pure modules with the functions and are not multi-tenant.
+
+## Files
+
+| Path | What |
+|---|---|
+| `supabase/migrations/` | Schema, RLS, the pacing RPCs, the cron jobs. |
+| `supabase/functions/api` | The writes. |
+| `supabase/functions/worker-poll` · `worker-send` · `meta-webhook` | The engine. |
+| `supabase/functions/_shared/` | `classify` (who gets a DM), `rules` (live-mode decisions, webhook signature), `recovery` (reel lookup, plan), `meta` (every Graph call; token in the header, never the URL), `engine` (prepare/analyze/poll against Postgres), `tokens`/`crypto` (encrypted tokens), `auth`, `db`, `http`. |
+| `web/public/` | `index.html`+`app.js` (recovery), `live.html`+`live.js` (automations), `settings.html`+`settings.js` (account), `session.js` (login), `config.js`, `csv.js`. No frameworks. |
+| `src/` | CLI scripts + re-exports of the shared modules. |
+| `test/` | Pure tests: classify, rules, recovery, crypto, csv. |

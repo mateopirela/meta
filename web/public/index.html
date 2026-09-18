@@ -13,20 +13,8 @@
 <body>
   <a class="skip" href="#panel">Saltar al contenido</a>
 
-  <!-- Login (solo cuando el servidor exige Firebase). -->
-  <div id="auth-gate" class="gate" hidden>
-    <div class="gate-card">
-      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0a0e27"/><path d="M8 11h16v10H13l-5 4z" fill="#c4f635"/></svg>
-      <h1>Recuperación de DMs</h1>
-      <p class="lead">Herramienta interna de 30X. Entrá con tu cuenta de Google de la empresa.</p>
-      <button type="button" class="primary" id="btn-login">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4Z"/><path fill="#c4f635" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22Z"/><path fill="#fff" opacity=".7" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9l3.3-2.6Z"/><path fill="#fff" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4Z"/></svg>
-        Entrar con Google
-      </button>
-      <p class="field-error" id="gate-error" role="alert" hidden></p>
-      <button type="button" class="ghost" id="btn-gate-logout" hidden>Salir y probar con otra cuenta</button>
-    </div>
-  </div>
+  <!-- Login (session.js lo dibuja cuando el servidor exige sesión). -->
+  <div id="auth-gate" class="gate" hidden></div>
 
   <div class="app" id="app" hidden>
     <aside class="rail">
@@ -41,6 +29,7 @@
       <nav class="pagenav" aria-label="Secciones">
         <a href="/" class="current" aria-current="page">Recuperación</a>
         <a href="/live.html">Automatizaciones</a>
+        <a href="/settings.html">Cuenta</a>
       </nav>
 
       <div class="user" id="user-chip" hidden>
@@ -53,7 +42,7 @@
           <li data-step="1">
             <button type="button" class="step" data-goto="1">
               <span class="step-num" aria-hidden="true">1</span>
-              <span class="step-text"><span class="step-title">Conectar</span><span class="step-hint">Clave de acceso de Meta</span></span>
+              <span class="step-text"><span class="step-title">Conectar</span><span class="step-hint">Tu clave de Meta</span></span>
             </button>
           </li>
           <li data-step="2">
@@ -95,38 +84,10 @@
       <section class="view" data-view="1">
         <header class="view-head">
           <p class="eyebrow">Paso 1 de 5</p>
-          <h1>Conectar con Meta</h1>
-          <p class="lead">Pegá la clave de acceso (token) del Business Manager. Se usa solo mientras dura esta recuperación y no se guarda en ningún lado.</p>
+          <h1>Tu cuenta de Meta</h1>
+          <p class="lead">La recuperación lee los comentarios y manda los DMs con la clave de Meta que tenés cargada en <a href="/settings.html">Cuenta</a>. Acá solo confirmamos que está y qué cuentas de Instagram alcanza.</p>
         </header>
-
-        <form id="form-connect" class="form" novalidate>
-          <div class="field">
-            <label for="token">Clave de acceso (token)</label>
-            <div class="input-row">
-              <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="token-help" placeholder="EAAG…">
-              <button type="button" class="ghost" id="toggle-token" aria-pressed="false" aria-controls="token">Mostrar</button>
-            </div>
-            <p class="help" id="token-help">Es un texto largo que suele empezar con <code>EAA</code>.</p>
-            <p class="field-error" id="token-error" role="alert" hidden></p>
-          </div>
-
-          <details class="howto">
-            <summary>¿Dónde consigo la clave?</summary>
-            <ol>
-              <li>En Business Manager: <strong>Configuración del negocio → Usuarios del sistema</strong>.</li>
-              <li>Elegí el usuario del sistema (o creá uno) y tocá <strong>Generar nuevo token</strong>.</li>
-              <li>Marcá estos permisos: <code>instagram_basic</code>, <code>instagram_manage_comments</code>, <code>pages_messaging</code>, <code>instagram_manage_messages</code>.</li>
-              <li>Copiá el token y pegalo arriba. La página de Facebook de la cuenta tiene que estar en ese Business Manager.</li>
-            </ol>
-          </details>
-
-          <div id="connect-result" class="notice" hidden></div>
-
-          <div class="actions">
-            <button type="submit" class="primary" id="btn-verify">Verificar acceso</button>
-            <button type="button" class="primary" id="btn-connect-next" hidden>Continuar</button>
-          </div>
-        </form>
+        <div id="connect"></div>
       </section>
 
       <!-- ── Paso 2 · El reel ──────────────────────────────────────────── -->

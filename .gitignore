@@ -15,3 +15,9 @@ node_modules/
 
 # Config local del agente (no depender del gitignore global de la maquina).
 .claude/
+
+# Snapshots del navegador de Playwright MCP.
+.playwright-mcp/
+
+# Estado local de la CLI de Supabase (project ref, pooler url).
+supabase/.temp/

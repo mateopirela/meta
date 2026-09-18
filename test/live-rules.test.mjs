@@ -17,7 +17,7 @@ const NOW = new Date("2026-08-28T12:00:00Z");
 const ago = (hours) => new Date(NOW.getTime() - hours * 3_600_000).toISOString();
 
 const trigger = (overrides = {}) => ({
-  resolved: { igUserId: "17841480692373523", igUsername: "cinthyasanchezai", mediaId: "media-1" },
+  resolved: { igUserId: "17841400000000001", igUsername: "creadora_oficial", mediaId: "media-1" },
   input: {
     keywords: ["humano"],
     includeReplies: false,
@@ -60,12 +60,12 @@ describe("evaluateComment", () => {
   });
 
   test("descarta al owner por id (nuestra propia respuesta pública vuelve por el webhook)", () => {
-    const own = comment({ from: { id: "17841480692373523", username: "cinthyasanchezai" }, username: "cinthyasanchezai" });
+    const own = comment({ from: { id: "17841400000000001", username: "creadora_oficial" }, username: "creadora_oficial" });
     assert.deepEqual(evaluateComment(own, trigger(), NOW), { accept: false, reason: "skip_owner" });
   });
 
   test("descarta al owner por username aunque no venga `from`", () => {
-    const own = comment({ from: null, username: "CinthyaSanchezAI" });
+    const own = comment({ from: null, username: "Creadora_Oficial" });
     assert.deepEqual(evaluateComment(own, trigger(), NOW), { accept: false, reason: "skip_owner" });
   });
 
@@ -100,7 +100,7 @@ describe("parseWebhookPayload", () => {
     object: "instagram",
     entry: [
       {
-        id: "17841480692373523",
+        id: "17841400000000001",
         time: 1_787_918_400,
         changes: [
           {
@@ -114,7 +114,7 @@ describe("parseWebhookPayload", () => {
 
   test("aplana un evento de comentario", () => {
     const [item] = parseWebhookPayload(payload);
-    assert.equal(item.igUserId, "17841480692373523");
+    assert.equal(item.igUserId, "17841400000000001");
     assert.equal(item.mediaId, "media-1");
     assert.equal(item.comment.id, "c9");
     assert.equal(item.comment.username, "ana");

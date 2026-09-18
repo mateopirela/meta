@@ -7,13 +7,13 @@ describe("parseShortcode", () => {
     assert.equal(parseShortcode("https://www.instagram.com/reel/DbqpQCZFDNC/"), "DbqpQCZFDNC");
     assert.equal(parseShortcode("https://www.instagram.com/reel/DbqpQCZFDNC/?igsh=abc"), "DbqpQCZFDNC");
     assert.equal(parseShortcode("https://www.instagram.com/p/Db1FjyejyMK"), "Db1FjyejyMK");
-    assert.equal(parseShortcode("https://instagram.com/cinthya.x/reel/DbrHiR-D6vM/"), "DbrHiR-D6vM");
+    assert.equal(parseShortcode("https://instagram.com/creadora.x/reel/DbrHiR-D6vM/"), "DbrHiR-D6vM");
     assert.equal(parseShortcode("  Dbyno76Ev_6  "), "Dbyno76Ev_6");
   });
 
   test("rechaza lo que no es un reel", () => {
     assert.equal(parseShortcode(""), null);
-    assert.equal(parseShortcode("https://www.instagram.com/cinthya.x/"), null);
+    assert.equal(parseShortcode("https://www.instagram.com/creadora.x/"), null);
     assert.equal(parseShortcode("hola que tal"), null);
   });
 });

@@ -12,7 +12,7 @@ import {
 } from "../src/classify.mjs";
 
 const NOW = new Date("2026-07-15T12:00:00Z");
-const OWNER = "cinthya";
+const OWNER = "creadora";
 const PHRASES = ["te acabo de enviar", "revisa tu dm"];
 
 const hoursAgo = (h) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
@@ -20,14 +20,14 @@ const hoursAgo = (h) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
 const comment = (over = {}) => ({
   id: "c1",
   username: "seguidor1",
-  text: "30x",
+  text: "guia",
   timestamp: hoursAgo(1),
   replies: { data: [] },
   ...over,
 });
 
 const options = (over = {}) => ({
-  keyword: "30x",
+  keyword: "guia",
   ownerUsername: OWNER,
   phrases: PHRASES,
   now: NOW,
@@ -48,15 +48,15 @@ describe("normalize", () => {
 
 describe("matchesKeyword", () => {
   test("matchea sin importar mayusculas", () => {
-    assert.equal(matchesKeyword("Quiero 30X porfa", "30x"), true);
+    assert.equal(matchesKeyword("Quiero GUIA porfa", "guia"), true);
   });
 
   test("matchea por contenido, como ManyChat", () => {
-    assert.equal(matchesKeyword("30xxx", "30x"), true);
+    assert.equal(matchesKeyword("guiaxx", "guia"), true);
   });
 
   test("no matchea cuando el keyword no esta", () => {
-    assert.equal(matchesKeyword("que buen video", "30x"), false);
+    assert.equal(matchesKeyword("que buen video", "guia"), false);
   });
 
   test("matchea keyword acentuado contra texto sin acento", () => {
@@ -71,7 +71,7 @@ describe("isProcessed", () => {
 
   test("respuesta del owner con frase de la automatizacion => procesado", () => {
     const c = comment({
-      replies: { data: [{ username: "cinthya", text: "Te acabo de enviar el link!" }] },
+      replies: { data: [{ username: "creadora", text: "Te acabo de enviar el link!" }] },
     });
     assert.equal(isProcessed(c, OWNER, PHRASES), true);
   });
@@ -84,17 +84,17 @@ describe("isProcessed", () => {
   });
 
   test("respuesta del owner que NO es la automatizacion => no procesado", () => {
-    const c = comment({ replies: { data: [{ username: "cinthya", text: "gracias!" }] } });
+    const c = comment({ replies: { data: [{ username: "creadora", text: "gracias!" }] } });
     assert.equal(isProcessed(c, OWNER, PHRASES), false);
   });
 
   test("sin frases configuradas, cualquier respuesta del owner cuenta (conservador)", () => {
-    const c = comment({ replies: { data: [{ username: "cinthya", text: "gracias!" }] } });
+    const c = comment({ replies: { data: [{ username: "creadora", text: "gracias!" }] } });
     assert.equal(isProcessed(c, OWNER, []), true);
   });
 
   test("acepta replies como array plano ademas de {data}", () => {
-    const c = comment({ replies: [{ username: "cinthya", text: "revisa tu dm" }] });
+    const c = comment({ replies: [{ username: "creadora", text: "revisa tu dm" }] });
     assert.equal(isProcessed(c, OWNER, PHRASES), true);
   });
 });
@@ -130,7 +130,7 @@ describe("classifyComment", () => {
   });
 
   test("ya respondido por la automatizacion => no se reenvia", () => {
-    const c = comment({ replies: { data: [{ username: "cinthya", text: "revisa tu DM" }] } });
+    const c = comment({ replies: { data: [{ username: "creadora", text: "revisa tu DM" }] } });
     assert.equal(classifyComment(c, options()).status, STATUS.SKIP_ALREADY_PROCESSED);
   });
 

@@ -2,7 +2,7 @@
  * PASO 1 — ¿Podemos enviar?
  *
  * Read-only. Lista las paginas que el token administra y dice si la cuenta de
- * Cinthya esta entre ellas. Si no lo esta, TODO lo demas es imposible: el
+ * la cuenta objetivo (IG_USERNAME) esta entre ellas. Si no lo esta, TODO lo demas es imposible: el
  * private_reply exige un Page Token de la pagina duena del post.
  *
  * Corre esto ANTES que nada.
@@ -48,7 +48,7 @@ const main = async () => {
     console.error(
       `\nBLOQUEADO: @${config.igUsername} no esta entre las paginas que el token administra.\n\n` +
         "No se puede enviar el DM. Opciones:\n" +
-        "  a) Agregar la pagina de FB de Cinthya a nuestro Business Manager, o\n" +
+        "  a) Agregar la pagina de FB de la cuenta a tu Business Manager, o\n" +
         "  b) Conseguir un Page Access Token de esa pagina.\n\n" +
         "Hasta entonces solo se puede llegar al CSV clasificado (lectura via CDP).\n",
     );

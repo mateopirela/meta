@@ -1,8 +1,11 @@
 // Interfaz de la recuperación: cinco pasos, un job. Sin frameworks.
 //
-// Estado en memoria: el token vive SOLO acá (nunca en localStorage). El
-// borrador del formulario (enlace, palabra, textos) sí se guarda para no
-// perderlo al recargar.
+// Lee sus propios jobs y filas directo de Postgres (supabase-js + RLS) y
+// escribe a través de la Edge Function `api`. La clave de Meta NO pasa por
+// acá: vive cifrada en el servidor, cargada desde /settings.html. El paso 1
+// solo confirma que está.
+import { auth, sb, api, must, startSession, refreshMe } from "/session.js";
+import { downloadCsv, JOB_COLUMNS } from "/csv.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -19,30 +22,48 @@ const ICON = {
   external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
 
-const state = { step: 1, token: "", accounts: [], job: null, poll: null };
+const state = { step: 1, job: null, poll: null };
 const DRAFT_KEY = "dm-recovery-draft-v1";
 
-// Sesion de Firebase (solo si el servidor la exige). Se llena en bootstrap().
-const auth = { required: false, user: null, getToken: async () => null, signOut: async () => {} };
+const hasToken = () => Boolean(auth.me?.meta?.configured);
+const accounts = () => auth.me?.meta?.accounts ?? [];
 
-// ── API ───────────────────────────────────────────────────────────────────────
-async function api(path, options = {}) {
-  const headers = { "content-type": "application/json", ...(options.headers ?? {}) };
-  const idToken = await auth.getToken();
-  if (idToken) headers.authorization = `Bearer ${idToken}`;
-  const res = await fetch(path, { ...options, headers });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(body.error ?? `Error ${res.status}`);
-    err.code = body.code;
-    err.status = res.status;
-    if (res.status === 401 && auth.required) {
-      showGate("Tu sesión venció. Volvé a entrar.");
-      auth.signOut().catch(() => {});
-    }
-    throw err;
-  }
-  return body;
+// ── Datos ─────────────────────────────────────────────────────────────────────
+/** El job como lo entiende esta UI: nombres de siempre + filas + resúmenes. */
+function jobView(job, rows = []) {
+  return {
+    ...job,
+    createdAt: job.created_at,
+    startedAt: job.started_at,
+    finishedAt: job.finished_at,
+    rows: rows.map((r) => ({ ...r, hours_left: (Date.parse(r.expires_at) - Date.now()) / 3_600_000 })),
+    tally: job.tally ?? { dm: {}, reply: {} },
+    hasMessages: Boolean(job.input?.card?.title && job.input?.card?.buttonTitle && job.input?.card?.buttonUrl),
+    hasToken: hasToken(),
+    log: (job.log ?? []).map((l) => ({ at: l.at, message: l.m ?? l.message ?? "" })),
+  };
+}
+
+async function loadJob(id) {
+  const [job, rows] = await Promise.all([
+    must(await sb.from("jobs").select("*").eq("id", id).single()),
+    must(await sb.from("dm_rows").select("*").eq("kind", "job").eq("parent_id", id).order("position", { ascending: true }).limit(2000)),
+  ]);
+  return jobView(job, rows);
+}
+
+async function loadJobs() {
+  const jobs = must(await sb.from("jobs").select("id,created_at,created_by,status,input,resolved,counts").order("created_at", { ascending: false }).limit(20));
+  return jobs.map((j) => ({
+    id: j.id,
+    createdAt: j.created_at,
+    createdBy: j.created_by,
+    status: j.status,
+    shortcode: j.input?.shortcode,
+    keyword: j.input?.keyword,
+    igUsername: j.resolved?.igUsername ?? null,
+    sendable: j.counts?.sendable ?? 0,
+  }));
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -66,7 +87,7 @@ function maxStep() {
     if (j.status === "ready" && j.rows?.length) return j.hasMessages ? 5 : 4;
     return 3;
   }
-  return state.token || state.accounts.length ? 2 : 1;
+  return hasToken() ? 2 : 1;
 }
 
 function setStep(n) {
@@ -82,6 +103,7 @@ function setStep(n) {
     btn.disabled = s > max;
     btn.setAttribute("aria-current", s === n ? "step" : "false");
   });
+  if (n === 1) renderConnect();
   if (n === 3) renderAnalysis();
   if (n === 4) { fillMessagesFromJob(); updatePreview(); }
   if (n === 5) renderSend();
@@ -94,27 +116,11 @@ document.addEventListener("click", (e) => {
   if (go && !go.disabled) setStep(Number(go.dataset.goto));
 });
 
-// CSV con login: un <a href> no manda el header Authorization, asi que con auth
-// activa el servidor devolvia 401. Bajamos el archivo con fetch y lo guardamos.
-document.addEventListener("click", async (e) => {
-  const a = e.target.closest("a[data-csv]");
-  if (!a || !auth.required) return;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-csv]");
+  if (!b || !state.job) return;
   e.preventDefault();
-  try {
-    const idToken = await auth.getToken();
-    const res = await fetch(a.href, { headers: idToken ? { authorization: `Bearer ${idToken}` } : {} });
-    if (!res.ok) throw new Error("No se pudo bajar el CSV.");
-    const url = URL.createObjectURL(await res.blob());
-    const tmp = document.createElement("a");
-    tmp.href = url;
-    tmp.download = a.getAttribute("download") || "recuperacion.csv";
-    document.body.appendChild(tmp);
-    tmp.click();
-    tmp.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  } catch (err) {
-    toast(err.message);
-  }
+  downloadCsv(`recuperacion-${state.job.input?.shortcode ?? state.job.id}.csv`, JOB_COLUMNS, state.job.rows);
 });
 
 // ── Borrador ──────────────────────────────────────────────────────────────────
@@ -152,56 +158,30 @@ $("#reelUrl").addEventListener("blur", (e) => setFieldError("reelUrl", e.target.
 $("#cardButtonUrl").addEventListener("blur", (e) => setFieldError("cardButtonUrl", e.target.value && !isHttpUrl(e.target.value) ? "El enlace tiene que empezar con https://" : null));
 
 // ── Paso 1 · Conectar ─────────────────────────────────────────────────────────
-$("#toggle-token").addEventListener("click", (e) => {
-  const input = $("#token");
-  const show = input.type === "password";
-  input.type = show ? "text" : "password";
-  e.currentTarget.textContent = show ? "Ocultar" : "Mostrar";
-  e.currentTarget.setAttribute("aria-pressed", String(show));
-});
+const noTokenNotice = (lead) => `
+  <div class="notice error">
+    <p class="notice-title">${ICON.alert} Falta tu clave de Meta</p>
+    <p>${lead}</p>
+  </div>
+  <div class="actions"><a class="button primary" href="/settings.html">Cargar mi clave en Cuenta</a></div>`;
 
-$("#form-connect").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const token = $("#token").value.trim();
-  setFieldError("token", null);
-  if (!token) return setFieldError("token", "Pegá la clave de acceso para continuar.");
-
-  const btn = $("#btn-verify");
-  btn.disabled = true;
-  btn.innerHTML = `${ICON.spinner} Verificando…`;
-  $("#connect-result").hidden = true;
-  try {
-    const { accounts } = await api("/api/verify", { method: "POST", body: JSON.stringify({ token }) });
-    state.token = token;
-    state.accounts = accounts;
-    $("#connect-result").className = "notice ok";
-    $("#connect-result").innerHTML = `
-      <p class="notice-title">${ICON.check} Acceso verificado</p>
-      <p>Esta clave puede leer y responder en estas cuentas:</p>
-      <ul class="chips">${accounts.map((a) => `<li class="chip"><strong>@${esc(a.username)}</strong><span>${esc(a.pageName)}</span></li>`).join("")}</ul>
-      <p class="help">El reel tiene que ser de una de ellas. Si falta alguna, su página de Facebook no está en el Business Manager.</p>`;
-    $("#connect-result").hidden = false;
-    $("#btn-connect-next").hidden = false;
-    btn.hidden = true;
-    setStep(1);
-    $("#btn-connect-next").focus();
-  } catch (err) {
-    setFieldError("token", err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Verificar acceso";
+function renderConnect() {
+  const el = $("#connect");
+  const m = auth.me?.meta;
+  if (!m) { el.innerHTML = `<p class="muted">${ICON.spinner} Cargando tu cuenta…</p>`; return; }
+  if (!m.configured) {
+    el.innerHTML = noTokenNotice("Sin ella no se puede leer ningún reel ni mandar ningún DM. Se carga una sola vez y sirve para todas las recuperaciones y automatizaciones.");
+    return;
   }
-});
-$("#token").addEventListener("input", () => {
-  // Cambió la clave: hay que verificarla de nuevo.
-  if (state.accounts.length) {
-    state.accounts = [];
-    $("#connect-result").hidden = true;
-    $("#btn-connect-next").hidden = true;
-    $("#btn-verify").hidden = false;
-  }
-});
-$("#btn-connect-next").addEventListener("click", () => setStep(2));
+  el.innerHTML = `
+    <div class="notice ok">
+      <p class="notice-title">${ICON.check} Clave cargada</p>
+      <p>Puede leer y responder en estas cuentas:</p>
+      <ul class="chips">${accounts().map((a) => `<li class="chip"><strong>@${esc(a.username)}</strong><span>${esc(a.pageName)}</span></li>`).join("")}</ul>
+      <p class="help">El reel tiene que ser de una de ellas. Si falta alguna, su página de Facebook no está en el Business Manager del token. <a href="/settings.html">Cambiar la clave</a>.</p>
+    </div>
+    <div class="actions"><button type="button" class="primary" data-goto="2">Continuar</button></div>`;
+}
 
 // ── Paso 2 · El reel ──────────────────────────────────────────────────────────
 $("#form-reel").addEventListener("submit", async (e) => {
@@ -212,27 +192,22 @@ $("#form-reel").addEventListener("submit", async (e) => {
   if (!reelUrl || !isReelUrl(reelUrl)) { setFieldError("reelUrl", "Pegá el enlace del reel (··· → Copiar enlace en Instagram)."); bad = true; }
   if (!keyword) { setFieldError("keyword", "Escribí la palabra que la gente comentó."); bad = true; }
   if (bad) { $(`#${!reelUrl || !isReelUrl(reelUrl) ? "reelUrl" : "keyword"}`).focus(); return; }
-  if (!state.token) { toast("Primero verificá la clave de acceso (paso 1)."); return setStep(1); }
+  if (!hasToken()) { toast("Primero cargá tu clave de Meta en Cuenta."); return setStep(1); }
 
   const btn = $("#btn-analyze");
   btn.disabled = true;
   btn.innerHTML = `${ICON.spinner} Buscando…`;
   try {
-    const { job } = await api("/api/jobs", {
+    const { job } = await api("/jobs", {
       method: "POST",
-      body: JSON.stringify({
-        token: state.token,
-        reelUrl,
-        keyword,
-        phrases: $("#phrases").value,
-        windowSafetyHours: $("#windowSafetyHours").value,
-      }),
+      body: JSON.stringify({ reelUrl, keyword, phrases: $("#phrases").value, windowSafetyHours: $("#windowSafetyHours").value }),
     });
-    state.job = job;
+    state.job = jobView(job, []);
     setStep(3);
     schedulePoll();
     loadHistory();
   } catch (err) {
+    if (err.code === "token_required") { await refreshMe().catch(() => {}); toast(err.message); return setStep(1); }
     toast(err.message);
   } finally {
     btn.disabled = false;
@@ -243,12 +218,12 @@ $("#form-reel").addEventListener("submit", async (e) => {
 // ── Poll ──────────────────────────────────────────────────────────────────────
 function schedulePoll() {
   clearTimeout(state.poll);
-  if (state.job && ["analyzing", "running"].includes(state.job.status)) state.poll = setTimeout(refresh, 2000);
+  if (state.job && ["analyzing", "running"].includes(state.job.status)) state.poll = setTimeout(refresh, 3000);
 }
 async function refresh() {
   if (!state.job) return;
   try {
-    const { job } = await api(`/api/jobs/${state.job.id}`);
+    const job = await loadJob(state.job.id);
     const before = state.job.status;
     state.job = job;
     if (state.step === 3) renderAnalysis();
@@ -262,7 +237,7 @@ async function refresh() {
 
 // ── Paso 3 · Quién falta ──────────────────────────────────────────────────────
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString("es-CO", { dateStyle: "medium", timeStyle: "short" }) : "");
-const fmtTime = (iso) => new Date(iso).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" });
+const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" }) : "");
 const fmtDur = (ms) => {
   const min = Math.ceil(ms / 60000);
   if (min < 1) return "menos de un minuto";
@@ -290,7 +265,7 @@ function renderAnalysis() {
       { label: "Separar a quién no le llegó", done: Boolean(j.counts) },
     ];
     const activeIdx = steps.findIndex((s) => !s.done);
-    el.innerHTML = head("Buscando…", `Esto tarda unos segundos, o un par de minutos si el reel tiene miles de comentarios.`) + `
+    el.innerHTML = head("Buscando…", `Arranca en menos de 20 segundos y tarda un poco más si el reel tiene miles de comentarios.`) + `
       <ol class="tasks">${steps.map((s, i) => `
         <li class="${s.done ? "done" : i === activeIdx ? "active" : ""}">
           <span class="task-icon">${s.done ? ICON.check : i === activeIdx ? ICON.spinner : ""}</span>
@@ -305,7 +280,7 @@ function renderAnalysis() {
     el.innerHTML = head("No pudimos analizar el reel") + `
       <div class="notice error"><p class="notice-title">${ICON.alert} ${esc(j.error)}</p></div>
       <div class="actions">
-        <button type="button" class="ghost" data-goto="1">Cambiar la clave</button>
+        <a class="button ghost" href="/settings.html">Revisar la clave</a>
         <button type="button" class="primary" data-goto="2">Probar con otro enlace</button>
       </div>`;
     return;
@@ -345,8 +320,8 @@ function funnelRow(label, value, pct, hi = false) {
   return `<div class="funnel-row ${hi ? "hi" : ""}"><span class="funnel-label">${label}</span><span class="funnel-bar"><span style="width:${pct}%"></span></span><span class="funnel-num">${value}</span></div>`;
 }
 
-const DM_LABEL = { "": "pendiente", sent: "DM enviado", already_replied: "ya tenía DM", comment_deleted: "comentario borrado", outside_window: "pasaron los 7 días", expired_mid_run: "pasaron los 7 días", needs_advanced_access: "no se pudo (Meta)", error: "no se pudo" };
-const REPLY_LABEL = { "": "pendiente", replied: "respondido", already_replied: "ya tenía respuesta", comment_deleted: "borrado", error: "no se pudo" };
+const DM_LABEL = { pending: "pendiente", sending: "enviando…", sent: "DM enviado", already_replied: "ya tenía DM", comment_deleted: "comentario borrado", outside_window: "pasaron los 7 días", expired_mid_run: "pasaron los 7 días", needs_advanced_access: "no se pudo (Meta)", error: "no se pudo" };
+const REPLY_LABEL = { pending: "pendiente", sending: "respondiendo…", replied: "respondido", already_replied: "ya tenía respuesta", comment_deleted: "borrado", skipped: "—", error: "no se pudo" };
 const STATUS_LABEL = { analyzing: "Analizando", ready: "Lista para enviar", running: "Enviando", paused: "Pausada", interrupted: "Interrumpida", done: "Terminada", error: "Con error" };
 
 function peopleTable(j, withStatus = false) {
@@ -401,7 +376,7 @@ function fillMessagesFromJob() {
 
 function updatePreview() {
   const j = state.job;
-  const owner = j?.resolved?.igUsername ?? state.accounts[0]?.username ?? "tu_cuenta";
+  const owner = j?.resolved?.igUsername ?? accounts()[0]?.username ?? "tu_cuenta";
   const person = j?.rows?.[0]?.username ?? "persona";
   const comment = j?.rows?.[0]?.text ?? j?.input?.keyword ?? $("#keyword").value ?? "IA";
   const replies = $("#replyTexts").value.split(/\r?\n/).map((t) => t.trim()).filter(Boolean);
@@ -439,7 +414,7 @@ $("#form-messages").addEventListener("submit", async (e) => {
   const btn = $("#btn-messages");
   btn.disabled = true;
   try {
-    const { job } = await api(`/api/jobs/${state.job.id}/messages`, {
+    const { job } = await api(`/jobs/${state.job.id}/messages`, {
       method: "POST",
       body: JSON.stringify({
         card: { title, buttonTitle, buttonUrl },
@@ -448,7 +423,7 @@ $("#form-messages").addEventListener("submit", async (e) => {
         replyIntervalMs: Number($("#replyIntervalSec").value) * 1000,
       }),
     });
-    state.job = job;
+    state.job = jobView(job, state.job.rows);
     setStep(5);
   } catch (err) {
     toast(err.message);
@@ -458,6 +433,8 @@ $("#form-messages").addEventListener("submit", async (e) => {
 });
 
 // ── Paso 5 · Enviar ───────────────────────────────────────────────────────────
+const sum = (obj, keys) => keys.reduce((s, k) => s + (obj[k] ?? 0), 0);
+
 function renderSend() {
   const j = state.job;
   const el = $("#send");
@@ -467,11 +444,10 @@ function renderSend() {
   const t = j.tally ?? { dm: {}, reply: {} };
   const hasReplies = j.input.replyTexts?.length > 0;
   const head = (title, lead) => `<header class="view-head"><p class="eyebrow">Paso 5 de 5</p><h1>${title}</h1>${lead ? `<p class="lead">${lead}</p>` : ""}</header>`;
-  const tokenField = j.hasToken || state.token ? "" : `
-    <div class="field">
-      <label for="resume-token">Clave de acceso (token)</label>
-      <input id="resume-token" type="password" autocomplete="off" spellcheck="false" placeholder="EAAG…">
-      <p class="help">Esta sesión no tiene la clave (el servidor se reinició o abriste una recuperación anterior). La clave nunca se guarda: pegala de nuevo para continuar.</p>
+  const tokenNotice = j.hasToken ? "" : `
+    <div class="notice error">
+      <p class="notice-title">${ICON.alert} Falta tu clave de Meta</p>
+      <p>Esta recuperación no puede enviar hasta que cargues una clave en <a href="/settings.html">Cuenta</a>. Lo que ya se envió quedó registrado.</p>
     </div>`;
   const recap = `
     <div class="recap">
@@ -482,9 +458,9 @@ function renderSend() {
     </div>`;
 
   if (j.status === "ready") {
-    el.innerHTML = head("Revisar y enviar", "Esto es lo que va a pasar. Los mensajes son reales y no se pueden deshacer, pero podés pausar en cualquier momento y cerrar esta pestaña sin cortar el envío.") + recap + tokenField + `
+    el.innerHTML = head("Revisar y enviar", "Esto es lo que va a pasar. Los mensajes son reales y no se pueden deshacer, pero podés pausar en cualquier momento y cerrar esta pestaña sin cortar el envío.") + recap + tokenNotice + `
       <label class="confirm">
-        <input type="checkbox" id="confirm-check">
+        <input type="checkbox" id="confirm-check" ${j.hasToken ? "" : "disabled"}>
         <span>Entiendo que se van a enviar mensajes reales a ${plural(n, "persona", "personas")}.</span>
       </label>
       <div class="actions">
@@ -496,38 +472,31 @@ function renderSend() {
     return;
   }
 
-  // Corriendo, pausada, interrumpida, terminada o con error a mitad de camino.
-  const dmDone = ["sent", "already_replied", "comment_deleted", "outside_window", "expired_mid_run", "needs_advanced_access", "error"].reduce((s, k) => s + (t.dm[k] ?? 0), 0);
+  // Corriendo, pausada, terminada o con error a mitad de camino.
+  const dmPending = sum(t.dm, ["pending", "sending"]);
+  const dmDone = n - dmPending;
   const dmSent = t.dm.sent ?? 0;
-  const replyDone = ["replied", "already_replied", "comment_deleted", "error"].reduce((s, k) => s + (t.reply[k] ?? 0), 0);
+  const replyPending = sum(t.reply, ["pending", "sending"]);
+  const replyDone = sum(t.reply, ["replied", "already_replied", "comment_deleted", "error"]);
   const replyTarget = dmSent;
-  const phase = j.progress?.phase;
+  const phase = dmPending > 0 ? "dm" : "reply";
   const running = j.status === "running";
 
-  // Estado visual de cada fase: activa (girando), hecha (check) o pendiente.
-  const dmState = phase === "dm" && running ? "active"
-    : dmDone >= n || phase === "reply" || j.status === "done" ? "done"
-    : "";
-  const replyState = !hasReplies ? "skip"
-    : j.status === "done" ? "done"
-    : phase === "reply" && running ? "active"
-    : "";
+  const dmState = phase === "dm" && running ? "active" : dmPending === 0 ? "done" : "";
+  const replyState = !hasReplies ? "skip" : j.status === "done" ? "done" : phase === "reply" && running ? "active" : "";
   const bar = (done, total) => `<span class="mini-bar" aria-hidden="true"><span style="width:${total ? Math.round((done / total) * 100) : 0}%"></span></span>`;
 
-  const titleByStatus = {
-    running: "Enviando…",
-    paused: "Pausada",
-    interrupted: "Se interrumpió",
-    done: "Listo",
-    error: "Se detuvo por un error",
-  };
+  const titleByStatus = { running: "Enviando…", paused: "Pausada", interrupted: "Se interrumpió", done: "Listo", error: "Se detuvo por un error" };
+  const remaining = phase === "dm" ? dmPending * j.input.sendIntervalMs : replyPending * j.input.replyIntervalMs;
   const leadByStatus = {
-    running: `Podés cerrar esta pestaña: el envío sigue en el servidor. ${j.progress ? `Quedan ~${fmtDur((j.progress.total - j.progress.done) * (phase === "dm" ? j.input.sendIntervalMs : j.input.replyIntervalMs))} de esta fase.` : ""}`,
+    running: `Podés cerrar esta pestaña: el envío sigue en el servidor. Quedan ~${fmtDur(remaining)} de esta fase.`,
     paused: "Nada se perdió. Cuando quieras, reanudá y sigue desde donde quedó.",
-    interrupted: "El servidor se reinició a mitad del envío. Nada se duplicó: reanudá y sigue desde donde quedó.",
+    interrupted: "Se interrumpió a mitad del envío. Nada se duplicó: reanudá y sigue desde donde quedó.",
     done: `${plural(dmSent, "persona recibió", "personas recibieron")} el mensaje directo${hasReplies ? ` y ${plural(t.reply.replied ?? 0, "comentario fue respondido", "comentarios fueron respondidos")}` : ""}.`,
     error: "Lo que ya se envió quedó registrado. Corregí lo que indica el error y reintentá.",
   };
+
+  const canResume = ["paused", "interrupted"].includes(j.status) || (j.status === "error" && j.resolved);
 
   el.innerHTML = head(titleByStatus[j.status] ?? STATUS_LABEL[j.status], leadByStatus[j.status] ?? "") + `
     ${j.status === "error" ? `<div class="notice error"><p class="notice-title">${ICON.alert} ${esc(j.error)}</p></div>` : ""}
@@ -550,11 +519,11 @@ function renderSend() {
         </div>
       </li>
     </ol>
-    ${["paused", "interrupted", "error"].includes(j.status) ? tokenField : ""}
+    ${canResume ? tokenNotice : ""}
     <div class="actions">
       ${running ? `<button type="button" class="ghost" id="btn-pause">${ICON.pause} Pausar</button>` : ""}
-      ${["paused", "interrupted"].includes(j.status) || (j.status === "error" && j.resolved) ? `<button type="button" class="primary" id="btn-start">${ICON.play} ${j.status === "error" ? "Reintentar" : "Reanudar"}</button>` : ""}
-      <a class="button ghost" data-csv href="/api/jobs/${esc(j.id)}/export.csv" download="recuperacion-${esc(j.input?.shortcode ?? j.id)}.csv">${ICON.download} Descargar lista (CSV)</a>
+      ${canResume && j.hasToken ? `<button type="button" class="primary" id="btn-start">${ICON.play} ${j.status === "error" ? "Reintentar" : "Reanudar"}</button>` : ""}
+      <button type="button" class="ghost" data-csv>${ICON.download} Descargar lista (CSV)</button>
       ${j.status === "done" ? `<button type="button" class="ghost" id="btn-new">Empezar otra recuperación</button>` : ""}
     </div>
     ${peopleTable(j, true)}
@@ -569,15 +538,14 @@ async function startJob() {
   const j = state.job;
   const btn = $("#btn-start");
   if (btn) { btn.disabled = true; btn.innerHTML = `${ICON.spinner} Arrancando…`; }
-  const token = $("#resume-token")?.value.trim() || state.token || undefined;
   try {
-    const { job } = await api(`/api/jobs/${j.id}/start`, { method: "POST", body: JSON.stringify(token ? { token } : {}) });
-    if (token) state.token = token;
-    state.job = job;
+    const { job } = await api(`/jobs/${j.id}/start`, { method: "POST", body: "{}" });
+    state.job = jobView(job, j.rows);
     renderSend();
     schedulePoll();
     loadHistory();
   } catch (err) {
+    if (err.code === "token_required") await refreshMe().catch(() => {});
     toast(err.message);
     renderSend();
   }
@@ -585,8 +553,8 @@ async function startJob() {
 
 async function pauseJob() {
   try {
-    const { job } = await api(`/api/jobs/${state.job.id}/pause`, { method: "POST", body: "{}" });
-    state.job = job;
+    const { job } = await api(`/jobs/${state.job.id}/pause`, { method: "POST", body: "{}" });
+    state.job = jobView(job, state.job.rows);
     toast("Pausando: termina la persona en curso y se detiene.", "ok");
     renderSend();
     schedulePoll();
@@ -598,9 +566,9 @@ async function pauseJob() {
 // ── Historial ─────────────────────────────────────────────────────────────────
 async function loadHistory() {
   try {
-    const { jobs } = await api("/api/jobs");
+    const jobs = await loadJobs();
     const ul = $("#history");
-    if (jobs.length === 0) { ul.innerHTML = `<li class="muted">Todavía no hay ninguna.</li>`; return; }
+    if (jobs.length === 0) { ul.innerHTML = `<li class="muted">Todavía no hay ninguna.</li>`; return jobs; }
     ul.innerHTML = jobs.slice(0, 12).map((j) => `
       <li>
         <button type="button" class="history-item ${state.job?.id === j.id ? "current" : ""}" data-open="${esc(j.id)}">
@@ -609,14 +577,14 @@ async function loadHistory() {
           <span class="history-date">${esc(fmtDate(j.createdAt))}</span>
         </button>
       </li>`).join("");
-  } catch { /* sin historial no pasa nada */ }
+    return jobs;
+  } catch { return []; }
 }
 $("#history").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-open]");
   if (!btn) return;
   try {
-    const { job } = await api(`/api/jobs/${btn.dataset.open}`);
-    openJob(job);
+    openJob(await loadJob(btn.dataset.open));
   } catch (err) {
     toast(err.message);
   }
@@ -634,103 +602,19 @@ function openJob(job) {
   loadHistory();
 }
 
-// ── Login ─────────────────────────────────────────────────────────────────────
-function showGate(message, { canSwitch = false } = {}) {
-  $("#app").hidden = true;
-  $("#auth-gate").hidden = false;
-  const err = $("#gate-error");
-  err.textContent = message ?? "";
-  err.hidden = !message;
-  $("#btn-gate-logout").hidden = !canSwitch;
-  $("#btn-login").hidden = canSwitch;
-}
-
-function showApp(user) {
-  $("#auth-gate").hidden = true;
-  $("#app").hidden = false;
-  if (user) {
-    $("#user-chip").hidden = false;
-    $("#user-email").textContent = user.email ?? "";
-    $("#user-email").title = user.email ?? "";
-  }
-  initApp();
-}
-
+// ── Arranque ──────────────────────────────────────────────────────────────────
 let appStarted = false;
-function initApp() {
+async function initApp() {
   if (appStarted) { loadHistory(); return; }
   appStarted = true;
   restoreDraft();
   updatePreview();
   setStep(1);
-  loadHistory().then(async () => {
-    try {
-      const { jobs } = await api("/api/jobs");
-      const live = jobs.find((j) => ["running", "analyzing"].includes(j.status));
-      if (live) {
-        const { job } = await api(`/api/jobs/${live.id}`);
-        openJob(job);
-      }
-    } catch { /* nada */ }
-  });
-}
-
-/**
- * Arranque: pregunta al servidor si hace falta login. Si no (uso local), abre
- * la app. Si si, carga el SDK de Firebase y espera la sesion.
- */
-async function bootstrap() {
-  let cfg;
-  try {
-    cfg = await fetch("/api/config").then((r) => r.json());
-  } catch {
-    showGate("No pude hablar con el servidor. Recargá la página.");
-    return;
+  const jobs = await loadHistory();
+  const live = jobs.find((j) => ["running", "analyzing"].includes(j.status));
+  if (live) {
+    try { openJob(await loadJob(live.id)); } catch { /* nada */ }
   }
-  if (!cfg.auth?.required) { showApp(null); return; }
-
-  auth.required = true;
-  const V = "10.14.1";
-  const [{ initializeApp }, fb] = await Promise.all([
-    import(`https://www.gstatic.com/firebasejs/${V}/firebase-app.js`),
-    import(`https://www.gstatic.com/firebasejs/${V}/firebase-auth.js`),
-  ]);
-  const fa = fb.getAuth(initializeApp(cfg.auth.firebase));
-  const provider = new fb.GoogleAuthProvider();
-  // `hd` solo pre-selecciona el dominio en el popup; el servidor es quien decide.
-  provider.setCustomParameters({ prompt: "select_account", ...(cfg.auth.allowedDomains?.[0] ? { hd: cfg.auth.allowedDomains[0] } : {}) });
-
-  auth.getToken = () => (fa.currentUser ? fa.currentUser.getIdToken() : Promise.resolve(null));
-  auth.signOut = () => fb.signOut(fa);
-
-  const login = async () => {
-    $("#gate-error").hidden = true;
-    try {
-      await fb.signInWithPopup(fa, provider);
-    } catch (err) {
-      const msg = err.code === "auth/unauthorized-domain"
-        ? "Este dominio no está autorizado en Firebase Auth (Authentication → Settings → Authorized domains)."
-        : err.code === "auth/popup-closed-by-user" ? "Se cerró la ventana de Google antes de terminar."
-        : err.message;
-      showGate(msg);
-    }
-  };
-  $("#btn-login").addEventListener("click", login);
-  $("#btn-gate-logout").addEventListener("click", () => auth.signOut().then(() => showGate()));
-  $("#btn-logout").addEventListener("click", () => auth.signOut().then(() => location.reload()));
-
-  fb.onAuthStateChanged(fa, async (user) => {
-    if (!user) { showGate(); return; }
-    auth.user = user;
-    // El servidor decide si este correo puede entrar (dominio/lista).
-    try {
-      await api("/api/jobs");
-      showApp(user);
-    } catch (err) {
-      if (err.status === 403) showGate(err.message, { canSwitch: true });
-      else if (err.status !== 401) showGate(err.message);
-    }
-  });
 }
 
-bootstrap();
+startSession({ title: "Recuperación de DMs", onApp: initApp });

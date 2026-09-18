@@ -1,9 +1,9 @@
 {
-  "name": "manychat-recovery-cinthya",
+  "name": "meta",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Recupera los DMs perdidos del apagon de ManyChat en un reel de Cinthya (private_reply por comment_id). Incluye interfaz web local (npm run web).",
+  "description": "Instagram comment-to-DM automation on Meta Graph API (private_reply). Multi-tenant: each user signs in with Supabase and brings their own System User token. Recovery pipeline + live ManyChat replacement + web UI.",
   "scripts": {
     "verify": "node --env-file=.env src/01-verify-access.mjs",
     "fetch": "node --env-file=.env src/02-fetch-comments.mjs",
@@ -17,7 +17,9 @@
     "queue:commit": "node --env-file=.env src/08-send-queue.mjs --commit",
     "reply": "node --env-file=.env src/09-public-reply.mjs",
     "reply:commit": "node --env-file=.env src/09-public-reply.mjs --commit",
-    "web": "node web/server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "functions:serve": "supabase functions serve --no-verify-jwt --env-file .env",
+    "functions:deploy": "supabase functions deploy --no-verify-jwt",
+    "web": "npx --yes serve web/public -l 8787"
   }
 }
